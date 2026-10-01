@@ -375,34 +375,39 @@ def register_in_supabase(
 def load_service_accounts_from_supabase_or_env(supabase_url: str, supabase_key: str) -> list:
     sa_list = []
     if supabase_url and supabase_key:
-        try:
-            endpoint = f"{supabase_url.rstrip('/')}/rest/v1/drive_service_accounts?is_active=eq.true&select=*"
-            headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-            res = requests.get(endpoint, headers=headers, timeout=5)
-            if res.ok:
-                data = res.json()
-                for r in data:
-                    raw_key = ""
-                    if isinstance(r.get("sa_json"), str):
-                        try:
-                            parsed = json.loads(r["sa_json"])
-                            raw_key = parsed.get("privateKey") or parsed.get("private_key")
-                        except Exception:
-                            pass
-                    elif r.get("sa_json"):
-                        raw_key = r["sa_json"].get("privateKey") or r["sa_json"].get("private_key")
-                    else:
-                        raw_key = r.get("private_key") or r.get("privateKey")
+        table_candidates = ["drive_service_accounts", "service_accounts", "gdrive_service_accounts"]
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+        for tbl in table_candidates:
+            try:
+                endpoint = f"{supabase_url.rstrip('/')}/rest/v1/{tbl}?select=*"
+                res = requests.get(endpoint, headers=headers, timeout=5)
+                if res.ok:
+                    data = res.json()
+                    for r in data:
+                        raw_key = ""
+                        if isinstance(r.get("sa_json"), str):
+                            try:
+                                parsed = json.loads(r["sa_json"])
+                                raw_key = parsed.get("privateKey") or parsed.get("private_key")
+                            except Exception:
+                                pass
+                        elif r.get("sa_json"):
+                            raw_key = r["sa_json"].get("privateKey") or r["sa_json"].get("private_key")
+                        else:
+                            raw_key = r.get("private_key") or r.get("privateKey")
 
-                    email = r.get("sa_email") or r.get("client_email") or r.get("email")
-                    if email and raw_key:
-                        private_key = raw_key.replace('\\n', '\n')
-                        if not any(s["email"] == email for s in sa_list):
-                            sa_list.append({"email": email, "private_key": private_key})
-        except Exception:
-            pass
+                        email = r.get("sa_email") or r.get("client_email") or r.get("email")
+                        if email and raw_key:
+                            private_key = raw_key.replace('\\n', '\n')
+                            if not any(s["email"] == email for s in sa_list):
+                                sa_list.append({"email": email, "private_key": private_key})
+                    if sa_list:
+                        print(f"  ✅ [SUPABASE DB] Successfully fetched {len(sa_list)} Service Account(s) from table [{tbl}].")
+                        break
+            except Exception as sb_err:
+                pass
 
-    # Fallback to SERVICE_ACCOUNTS_JSON from environment if Supabase yielded 0 SAs
+    # Fallback to SERVICE_ACCOUNTS_JSON or single SA credentials from environment
     if not sa_list:
         raw_env_sa = os.getenv("SERVICE_ACCOUNTS_JSON") or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
         if raw_env_sa:
@@ -419,6 +424,11 @@ def load_service_accounts_from_supabase_or_env(supabase_url: str, supabase_key: 
                                 sa_list.append({"email": email, "private_key": private_key})
             except Exception as env_err:
                 print(f"  ⚠️ Env SA Parse Warning: {env_err}")
+
+        email_single = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL", "")
+        key_single = os.getenv("GOOGLE_PRIVATE_KEY", "")
+        if email_single and key_single and not any(s["email"] == email_single for s in sa_list):
+            sa_list.append({"email": email_single, "private_key": key_single.replace('\\n', '\n')})
 
     return sa_list
 
@@ -457,8 +467,11 @@ def fetch_gdrive_folder_files(folder_id: str, access_token: str = "") -> list:
     if not folder_id:
         return []
     headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
+    api_key = os.getenv("GOOGLE_API_KEY", "")
     query = f"'{folder_id}' in parents and trashed = false"
     url = f"https://www.googleapis.com/drive/v3/files?q={requests.utils.quote(query)}&fields=files(id,name,size,mimeType)&pageSize=1000"
+    if not access_token and api_key:
+        url += f"&key={api_key}"
     
     all_files = []
     try:
