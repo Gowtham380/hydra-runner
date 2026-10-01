@@ -448,8 +448,16 @@ def get_gdrive_access_token_from_sa(sa: dict) -> str:
         formatted_key = f"-----BEGIN PRIVATE KEY-----\n{formatted_key}\n-----END PRIVATE KEY-----\n"
 
     try:
-        from google.oauth2 import service_account
-        from google.auth.transport.requests import Request
+        try:
+            from google.oauth2 import service_account
+            from google.auth.transport.requests import Request
+        except ImportError:
+            import subprocess
+            print("  ⚡ Auto-installing missing google-auth dependencies...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "google-auth", "google-api-python-client"])
+            from google.oauth2 import service_account
+            from google.auth.transport.requests import Request
+
         sa_info = {
             "type": "service_account",
             "client_email": email,
