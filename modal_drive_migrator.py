@@ -374,6 +374,8 @@ def register_in_supabase(
 
 def load_service_accounts_from_supabase_or_env(supabase_url: str, supabase_key: str) -> list:
     sa_list = []
+    
+    # 1. Attempt Supabase Table Retrieval
     if supabase_url and supabase_key:
         table_candidates = ["drive_service_accounts", "service_accounts", "gdrive_service_accounts"]
         headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
@@ -407,30 +409,72 @@ def load_service_accounts_from_supabase_or_env(supabase_url: str, supabase_key: 
             except Exception as sb_err:
                 pass
 
-    # Fallback to SERVICE_ACCOUNTS_JSON or single SA credentials from environment
+    # 2. Fallback to SERVICE_ACCOUNTS_JSON / GOOGLE_SERVICE_ACCOUNT_JSON
     if not sa_list:
         raw_env_sa = os.getenv("SERVICE_ACCOUNTS_JSON") or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
         if raw_env_sa:
             clean_env_sa = raw_env_sa.strip().strip("'").strip('"')
+
+            # Try Base64 Decoding if applicable
+            try:
+                if not clean_env_sa.startswith(("{", "[")) and len(clean_env_sa) > 50:
+                    decoded_bytes = base64.b64decode(clean_env_sa)
+                    clean_env_sa = decoded_bytes.decode("utf-8", errors="ignore").strip()
+            except Exception:
+                pass
+
+            parsed_items = []
+            # Try 1: Standard JSON loads
             try:
                 parsed = json.loads(clean_env_sa)
-                parsed_list = [parsed] if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
-                for item in parsed_list:
-                    email = item.get("email") or item.get("client_email") or item.get("sa_email")
-                    raw_key = item.get("privateKey") or item.get("private_key")
-                    if email and raw_key:
-                        private_key = raw_key.replace('\\n', '\n')
-                        if not any(s["email"] == email for s in sa_list):
-                            sa_list.append({"email": email, "private_key": private_key})
-                if sa_list:
-                    print(f"  ✅ [ENV SECRET] Successfully loaded {len(sa_list)} Service Account(s) from SERVICE_ACCOUNTS_JSON.")
-            except Exception as env_err:
-                print(f"  ⚠️ Env SA Parse Warning: {env_err}")
+                parsed_items = [parsed] if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+            except Exception:
+                # Try 2: AST literal_eval (Python dict/list string representation)
+                try:
+                    import ast
+                    parsed = ast.literal_eval(clean_env_sa)
+                    parsed_items = [parsed] if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+                except Exception:
+                    # Try 3: NDJSON (Newline delimited JSON)
+                    for line in clean_env_sa.splitlines():
+                        line = line.strip()
+                        if line:
+                            try:
+                                item = json.loads(line)
+                                if isinstance(item, dict):
+                                    parsed_items.append(item)
+                            except Exception:
+                                pass
+
+            # Process extracted items
+            for item in parsed_items:
+                email = item.get("email") or item.get("client_email") or item.get("sa_email")
+                raw_key = item.get("privateKey") or item.get("private_key")
+                if email and raw_key:
+                    private_key = str(raw_key).replace('\\n', '\n')
+                    if not any(s["email"] == email for s in sa_list):
+                        sa_list.append({"email": email, "private_key": private_key})
+
+            # Try 4: Regex Extraction if structured parsing failed
+            if not sa_list:
+                emails = re.findall(r'[\w\.-]+@[\w\.-]+\.gserviceaccount\.com', clean_env_sa)
+                keys = re.findall(r'-----BEGIN PRIVATE KEY-----[\s\S]+?-----END PRIVATE KEY-----', clean_env_sa)
+                if emails and keys:
+                    for em, k in zip(emails, keys):
+                        if not any(s["email"] == em for s in sa_list):
+                            sa_list.append({"email": em, "private_key": k.replace('\\n', '\n')})
+
+            if sa_list:
+                print(f"  ✅ [ENV SECRET] Successfully loaded {len(sa_list)} Service Account(s) from SERVICE_ACCOUNTS_JSON.")
 
         email_single = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL", "")
         key_single = os.getenv("GOOGLE_PRIVATE_KEY", "")
         if email_single and key_single and not any(s["email"] == email_single for s in sa_list):
             sa_list.append({"email": email_single, "private_key": key_single.replace('\\n', '\n')})
+
+    if not sa_list:
+        print("  ❌ [CREDENTIAL ERROR] No Service Accounts loaded!")
+        print("  👉 Please verify `SERVICE_ACCOUNTS_JSON` is added in GitHub Repo Secrets (Gowtham380/hydra-runner).")
 
     return sa_list
 
@@ -795,5 +839,3 @@ else:
 
 if __name__ == "__main__":
     run_migration_logic()
-
-
