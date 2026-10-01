@@ -413,15 +413,17 @@ def load_service_accounts_from_supabase_or_env(supabase_url: str, supabase_key: 
         if raw_env_sa:
             clean_env_sa = raw_env_sa.strip().strip("'").strip('"')
             try:
-                parsed_list = json.loads(clean_env_sa)
-                if isinstance(parsed_list, list):
-                    for item in parsed_list:
-                        email = item.get("email") or item.get("client_email")
-                        raw_key = item.get("privateKey") or item.get("private_key")
-                        if email and raw_key:
-                            private_key = raw_key.replace('\\n', '\n')
-                            if not any(s["email"] == email for s in sa_list):
-                                sa_list.append({"email": email, "private_key": private_key})
+                parsed = json.loads(clean_env_sa)
+                parsed_list = [parsed] if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+                for item in parsed_list:
+                    email = item.get("email") or item.get("client_email") or item.get("sa_email")
+                    raw_key = item.get("privateKey") or item.get("private_key")
+                    if email and raw_key:
+                        private_key = raw_key.replace('\\n', '\n')
+                        if not any(s["email"] == email for s in sa_list):
+                            sa_list.append({"email": email, "private_key": private_key})
+                if sa_list:
+                    print(f"  ✅ [ENV SECRET] Successfully loaded {len(sa_list)} Service Account(s) from SERVICE_ACCOUNTS_JSON.")
             except Exception as env_err:
                 print(f"  ⚠️ Env SA Parse Warning: {env_err}")
 
