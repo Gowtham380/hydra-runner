@@ -1,0 +1,6 @@
+huggingface_hub
+requests
+python-dotenv
+cryptography
+google-auth
+google-api-python-client
