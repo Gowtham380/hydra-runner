@@ -45,6 +45,7 @@ except ImportError:
 
 DEFAULT_CHUNK_SIZE = 100 * 1024 * 1024  # 100MB Default Chunk
 HEADER_MASK_LIMIT = 1024
+XOR_KEY = 0x5F
 MAX_PARALLEL_WORKERS = 8  # 8 Parallel Threads per Movie Batch Upload
 
 def get_adaptive_chunk_size(file_size_bytes: int) -> int:
@@ -734,7 +735,8 @@ def register_in_supabase(
     target_repo: str,
     tmdb_meta: dict,
     supabase_url: str,
-    supabase_key: str
+    supabase_key: str,
+    extracted_meta: dict = None
 ):
     """
     Registers metadata in Supabase `movies` table & multi-quality sources in `movie_files`.
