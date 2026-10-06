@@ -43,13 +43,23 @@ except ImportError:
     print("❌ Missing required packages! Run: pip install huggingface_hub requests python-dotenv cryptography modal")
     sys.exit(1)
 
-# ================================================================================
-# CONSTANTS & CONFIGURATION
-# ================================================================================
-XOR_KEY = 0x5F
-DEFAULT_CHUNK_SIZE = 100 * 1024 * 1024  # 100MB Chunk
+DEFAULT_CHUNK_SIZE = 100 * 1024 * 1024  # 100MB Default Chunk
 HEADER_MASK_LIMIT = 1024
 MAX_PARALLEL_WORKERS = 8  # 8 Parallel Threads per Movie Batch Upload
+
+def get_adaptive_chunk_size(file_size_bytes: int) -> int:
+    """
+    Adaptive Dynamic Chunk Sizing Engine:
+    - 4K / Large Movies (>= 8 GB): 250 MB chunks (60% less HTTP overhead & Git LFS latency)
+    - 1080p High Bitrate (>= 3 GB): 150 MB chunks
+    - Standard / Episodes (< 3 GB): 100 MB chunks
+    """
+    if not file_size_bytes or file_size_bytes < 3 * 1024 * 1024 * 1024:
+        return 100 * 1024 * 1024
+    elif file_size_bytes < 8 * 1024 * 1024 * 1024:
+        return 150 * 1024 * 1024
+    else:
+        return 250 * 1024 * 1024
 
 # 10-Dataset Mesh Repositories for High-Throughput Ingestion
 MESH_REPOSITORIES = [
@@ -123,63 +133,153 @@ def clean_movie_title(raw_title: str) -> str:
     return s
 
 
+def extract_file_metadata(raw_filename: str) -> dict:
+    """
+    Extracts resolution quality, rip_type (PreDVD, BluRay, WEB-DL, etc.), codec, 
+    audio languages, and UI quality_label directly from the raw GDrive filename.
+    """
+    text = raw_filename.lower()
+    
+    # 1. Rip Type Detection with word boundaries
+    rip_type = "WEB-DL"
+    if re.search(r'\b(predvd|pre-dvd|dvdscr)\b', text):
+        rip_type = "PreDVD"
+    elif re.search(r'\bimax\b', text):
+        rip_type = "IMAX Edition"
+    elif re.search(r'\b(bluray|blu-ray|bdrip|bd-rip|brrip|br-rip|br|bdr)\b', text):
+        rip_type = "BluRay"
+    elif re.search(r'\b(web-dl|webdl)\b', text):
+        rip_type = "WEB-DL"
+    elif re.search(r'\b(webrip|web-rip)\b', text):
+        rip_type = "WEBRip"
+    elif re.search(r'\b(hdrip|hd-rip)\b', text):
+        rip_type = "HDRip"
+    elif re.search(r'\b(dvdrip|dvd-rip|dvdr)\b', text):
+        rip_type = "DVDRip"
+    elif re.search(r'\b(camrip|hdcam|cam|hdts|telecine|tc|ts)\b', text):
+        rip_type = "CAM/TS"
+    elif re.search(r'\b(hdtv|hdtvrip)\b', text):
+        rip_type = "HDTV"
+
+    # 2. Quality Resolution (PreDVD/CAM takes absolute precedence if detected)
+    if rip_type in ("PreDVD", "CAM/TS"):
+        quality = "PreDVD"
+    elif re.search(r'\b(2160p|4k|uhd)\b', text):
+        quality = "2160p"
+    elif re.search(r'\b(1080p|fhd)\b', text):
+        quality = "1080p"
+    elif re.search(r'\b(720p|hd)\b', text):
+        quality = "720p"
+    elif re.search(r'\b(480p|sd|360p|240p)\b', text):
+        quality = "480p"
+    else:
+        quality = "1080p"
+
+    # 3. Codec Detection
+    codec = "x264"
+    if re.search(r'\b(x265|hevc|h\.?265)\b', text):
+        codec = "HEVC/x265"
+    elif re.search(r'\b(x264|avc|h\.?264)\b', text):
+        codec = "x264"
+    elif re.search(r'\bav1\b', text):
+        codec = "AV1"
+
+    # 4. Audio Language Track Extraction
+    langs = []
+    if re.search(r'\b(tam|tamil)\b', text): langs.append("Tamil")
+    if re.search(r'\b(tel|telugu)\b', text): langs.append("Telugu")
+    if re.search(r'\b(hin|hindi)\b', text): langs.append("Hindi")
+    if re.search(r'\b(mal|malayalam)\b', text): langs.append("Malayalam")
+    if re.search(r'\b(kan|kannada)\b', text): langs.append("Kannada")
+    if re.search(r'\b(eng|english)\b', text): langs.append("English")
+    if not langs: langs = ["Tamil"]
+
+    # 5. Formatted UI Quality Label
+    if quality == "2160p":
+        quality_label = f"4K ULTRA HD ({rip_type})"
+    elif quality == "PreDVD":
+        quality_label = f"PRE-DVD HQ ({rip_type})"
+    elif quality == "1080p":
+        quality_label = f"1080P FULL HD ({rip_type})"
+    elif quality == "720p":
+        quality_label = f"720P HD ({rip_type})"
+    else:
+        quality_label = f"480P SD ({rip_type})"
+
+    return {
+        "quality": quality,
+        "rip_type": rip_type,
+        "codec": codec,
+        "audio_languages": langs,
+        "quality_label": quality_label
+    }
+
+
 def sanitize_movie_title(raw_filename: str):
     """
-    Parses clean canonical title, release year, resolution/quality, and generates master slug key.
-    Aggressively strips unwanted site prefixes, file size noise (MB/GB), resolution tags, and uploader labels
-    so multiple files for the same movie resolve to the EXACT SAME Master Canonical Movie Slug.
+    Parses clean canonical title, release year, resolution/quality, metadata dictionary, and master slug key.
+    Uses 4-step delimiter normalization to ensure zero-noise titles & exact slug canonicalization.
     """
+    extracted_meta = extract_file_metadata(raw_filename)
     stem = Path(raw_filename).stem
-    stem = clean_movie_title(stem)
 
-    # Extract Quality
-    quality = "720p"  # Default
-    if re.search(r'2160p|4k|uhd', stem, re.IGNORECASE):
-        quality = "2160p_4K"
-    elif re.search(r'1080p|fhd', stem, re.IGNORECASE):
-        quality = "1080p"
-    elif re.search(r'720p|hd', stem, re.IGNORECASE):
-        quality = "720p"
-    elif re.search(r'480p|sd', stem, re.IGNORECASE):
-        quality = "480p"
+    # 1. Strip domain prefixes FIRST while dots are intact
+    for _ in range(3):
+        stem = re.sub(r'^(?:https?://)?(?:www\.)?[a-z0-9\.-]+\.[a-z]{2,15}\s*[-:_]*\s*', '', stem, flags=re.IGNORECASE).strip()
+        stem = re.sub(r'^(?:1tamilmv|tamilmv|movieztamizha|isaimini|kuttymovies|tamilrockers|tamilblasters|omgxmovies|crazymoviescmc|vegamovies|bolly4u|9xmovies|filmyzilla|katmoviehd)\s*[-:_]*\s*', '', stem, flags=re.IGNORECASE).strip()
+        stem = re.sub(r'^\s*\[?\s*(l|copy of|tgstream)\s*\]?\s*[-_:]*\s*', '', stem, flags=re.IGNORECASE).strip()
 
-    # Extract Year
-    year_match = re.search(r'\(?((?:19|20)\d{2})\)?', stem)
+    # 2. Extract Year (19XX or 20XX)
+    year_match = re.search(r'\b((?:19|20)\d{2})\b', stem)
     year = year_match.group(1) if year_match else ""
 
     # Check if TV Series / Anime Episode
     ep_match = re.search(r'(?i)\b(s\d+e\d+|ep?\d+|episode\s*\d+|day\s*\d+)\b', stem)
     is_episode = bool(ep_match)
 
-    # Clean Name: Strip bracketed noise & file size tags (e.g. 400MB, 700MB, 2GB, 14.7GB)
-    cleaned = re.sub(r'\[.*?\]|\(.*?\)', ' ', stem)
-    cleaned = re.sub(r'(?i)\b\d+(\.\d+)?\s*(gb|mb|g|m)\b', ' ', cleaned)
-    cleaned = re.sub(r'(?i)\b(1080p|720p|480p|2160p|4k|bluray|web-dl|webrip|predvd|hdrip|dvdrip|x264|x265|hevc|aac|esub|esubs|h264|hq|org|aud|dd5|1|repack|dual|multi|clean|smd|lezha|blura|dub|hin|eng|tam|tel|mal|kan|hdr|sdr|true|avc|uncut|line|hdtv|v2|tamil|telugu|hindi|kannada|malayalam|english)\b', ' ', cleaned)
-    
-    # Strip standalone L prefix if left at beginning
-    cleaned = re.sub(r'(?i)^\s*l\s+', '', cleaned)
-    cleaned = re.sub(r'[@_.\-+]', ' ', cleaned)
-    cleaned = ' '.join(cleaned.split()).strip()
+    # 3. Delimiter Normalization (Replace -, _, ., +, [, ], (, ), @, # with spaces)
+    s = re.sub(r'[@_.\-+#\[\]\(\)]', ' ', stem)
 
-    if not cleaned:
-        cleaned = stem
+    # 4. Strip noise tags and codecs (including esu, esub, br, bd, hq, etc.)
+    noise_pattern = r'(?i)\b(br-rip|brrip|bd-rip|bdrip|bluray|blu-ray|web-dl|webdl|web-rip|webrip|hd-rip|hdrip|dvd-rip|dvdrip|pre-dvd|predvd|hd-ts|hdts|cam-rip|camrip|hdcam|telecine|esubtitle|esubtitles|esubs|esub|msubs|msub|softsub|hardsub|nosub|hcsub|multi-audio|clean-audio|org-audio|clean-aud|tam-dub|hin-dub|tel-dub|mal-dub|directors-cut|director-cut|special-edition|hq-hdrip|hq\s*clean|2160p|1080p|720p|480p|360p|240p|4k|uhd|fhd|sd|hdr10plus|hdr10\+|hdr10|hdr|sdr|10bit|8bit|x264|x265|hevc|h264|h265|avc|av1|xvid|divx|aac2\.0|aac5\.1|ac3|eac3|ddp5\.1|dd5\.1ch|dd5\.1|ddp|dd5|dts-hd|dts|truehd|atmos|mp3|flac|opus|2ch|6ch|8ch|5\.1|7\.1|2\.0|repack|proper|v2|v3|v4|uncut|unrated|extended|remastered|imax|hq|lq|clean|org|line|dubbed|dub|multiaudio|multi|dual|tam|tamil|hin|hindi|tel|telugu|mal|malayalam|kan|kannada|eng|english|br|bd|bdr|dvd|dvdr|r5|cam|tc|ts|hdtvrip|hdtv|pdtv|vodrip|ppvrip|esu|esub)\b'
+    s = re.sub(noise_pattern, ' ', s)
+    s = re.sub(r'(?i)\b\d+(\.\d+)?\s*(gb|mb|g|m)\b', ' ', s)
 
-    slug_base = cleaned.lower()
-    slug_base = re.sub(r'[^a-z0-9\s-]', '', slug_base)
-    slug_base = re.sub(r'\s+', '-', slug_base).strip('-')
+    # 5. Filter words & strip standalone noise tokens
+    valid_short_words = {'it', 'up', 'ai', 'go', 'me', 'we', 'no', 'my', 'be', 'do', 'if', 'in', 'is', 'of', 'on', 'or', 'to', 'us', 'vs', 'ii', 'iii', 'iv', 'v'}
+    words = [w for w in s.split() if w.strip()]
+    clean_words = []
+    for w in words:
+        wl = w.lower()
+        if len(w) <= 2 and wl not in valid_short_words and not w.isdigit():
+            continue
+        if wl in {'esub', 'msub', 'brrip', 'bdrip', 'webdl', 'webrip', 'predvd', 'hdrip', 'dvdrip', 'x264', 'x265', 'hevc', 'aac', 'clean', 'hq', 'esu', 'br', 'bd', 'l'}:
+            continue
+        clean_words.append(w)
+
+    clean_title = ' '.join(clean_words).strip()
+    if year:
+        clean_title = re.sub(r'\b' + year + r'\b', '', clean_title).strip()
+    clean_title = clean_title.title() if clean_title else stem.title()
 
     if is_episode:
-        slug = slug_base
-        clean_title = cleaned.title()
-    elif year and year not in slug_base:
+        clean_title_with_year = clean_title
+    elif year:
+        clean_title_with_year = f"{clean_title} ({year})"
+    else:
+        clean_title_with_year = clean_title
+
+    # Generate master slug key (lowercase alphanumeric only, zero punctuation)
+    slug_base = re.sub(r'[^a-z0-9]', '', clean_title.lower())
+    if year:
         slug = f"{slug_base}-{year}"
-        clean_title = f"{cleaned.title()} ({year})"
     else:
         slug = slug_base
-        clean_title = cleaned.title()
 
-    sanitized_filename = f"{slug}.mp4"
-    return clean_title, sanitized_filename, slug, quality
+    quality = extracted_meta["quality"]
+    sanitized_filename = f"{slug}_{quality}.mp4"
+
+    return clean_title_with_year, sanitized_filename, slug, quality, extracted_meta
 
 
 def obfuscate_header(data_buffer: bytearray):
