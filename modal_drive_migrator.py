@@ -103,8 +103,8 @@ def clean_movie_title(raw_title: str) -> str:
 
     # Prefix cleaning loop for chained site names (e.g. www.TamilMV.cz - Movieztamizha - MovieName)
     prefix_patterns = [
-        # Domains: www.something.ext, http://, https://
-        r'^(?:https?://)?(?:www\.)?[a-z0-9\.-]+\.[a-z]{2,6}(?:\.[a-z]{2})?\s*[-:_]*\s*',
+        # Domains: www.something.ext, http://, https:// (e.g. .capital, .technology, .online)
+        r'^(?:https?://)?(?:www\.)?[a-z0-9\.-]+\.[a-z]{2,15}(?:\.[a-z]{2})?\s*[-:_]*\s*',
         # Known site & release group names at start of title
         r'^(?:1tamilmv|tamilmv|movieztamizha|omgxmovies|sam\s*dub\s*lezha|sam\s*dub|lezha|crazymoviescmc|crazymovies|cmc|smd|gtm|tgstream|tglezha|blura|isaimini|kuttymovies|tamilrockers|tamildbox|tamilblasters|tamildub|tamilgun|tamilyogi|tamilprint|tamilplay|moviesda|movieswood|moviesnation|moviezaddiction|moviez|omgmovies|omg|klwap|mallumv|bolly4u|worldfree4u|9xmovies|7starhd|filmyzilla|filmywap|desiremovies|hdhub4u|vegamovies|vega\s*movies|sdmoviespoint|katmoviehd|skymovies|ssrflix)\s*[-:_]*\s*',
         # Standalone L / L- / L_ / [L] prefix tags
