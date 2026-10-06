@@ -697,7 +697,7 @@ def render_command_center_hud(
     queue_strs = []
     for idx, q_item in enumerate(queue_items[:3], start=1):
         q_name = q_item.get("name", "Video")
-        clean_q_name, _, _, q_qual = sanitize_movie_title(q_name)
+        clean_q_name, _, _, q_qual, _ = sanitize_movie_title(q_name)
         q_mb = int(int(q_item.get("size", 0)) / (1024*1024))
         queue_strs.append(f"{idx}. {clean_q_name} [{q_qual}] ({q_mb}MB)")
     queue_formatted = " | ".join(queue_strs) if queue_strs else "1. Next in Queue (Processing)"

@@ -692,7 +692,7 @@ def render_command_center_hud(
     queue_strs = []
     for idx, q_item in enumerate(queue_items[:3], start=1):
         q_name = q_item.get("name", "Video")
-        clean_q_name, _, _, q_qual = sanitize_movie_title(q_name)
+        clean_q_name, _, _, q_qual, _ = sanitize_movie_title(q_name)
         q_mb = int(int(q_item.get("size", 0)) / (1024*1024))
         queue_strs.append(f"{idx}. {clean_q_name} [{q_qual}] ({q_mb}MB)")
     queue_formatted = " | ".join(queue_strs) if queue_strs else "1. Next in Queue (Processing)"
@@ -1248,7 +1248,7 @@ def run_migration_logic():
             raw_name = item.get("name", "movie.mp4")
             file_id = item.get("id")
             file_size = int(item.get("size", 0))
-            clean_title, sanitized_filename, slug, quality = sanitize_movie_title(raw_name)
+            clean_title, sanitized_filename, slug, quality, extracted_meta = sanitize_movie_title(raw_name)
 
             file_size_mb = file_size / (1024**2) if file_size > 0 else 721.4
             file_size_gb = file_size / (1024**3) if file_size > 0 else 0.70
@@ -1312,7 +1312,8 @@ def run_migration_logic():
                     target_repo=target_repo,
                     tmdb_meta=tmdb_meta,
                     supabase_url=supabase_url,
-                    supabase_key=supabase_key
+                    supabase_key=supabase_key,
+                    extracted_meta=extracted_meta
                 )
                 ingested_bytes += file_size
                 continue
@@ -1345,7 +1346,8 @@ def run_migration_logic():
                 target_repo=target_repo,
                 tmdb_meta=tmdb_meta,
                 supabase_url=supabase_url,
-                supabase_key=supabase_key
+                supabase_key=supabase_key,
+                extracted_meta=extracted_meta
             )
 
             ingested_bytes += file_size
