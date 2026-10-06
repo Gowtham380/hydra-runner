@@ -959,13 +959,16 @@ def download_gdrive_range_segment(
                         stats["downloaded"] += len(chunk)
 
 
-def download_gdrive_stream(file_id: str, access_token: str, dest_path: Path, expected_size: int = 0, num_threads: int = 8):
+def download_gdrive_stream(file_id: str, access_tokens, dest_path: Path, expected_size: int = 0, num_threads: int = 8, sa_offset: int = 0):
     """
     Downloads GDrive file using an 8-Thread Concurrent Byte-Range Stream Mesh.
-    Bypasses GDrive single-connection speed limits, accelerating downloads to 20MB/s - 40MB/s+.
+    Rotates Service Account Access Tokens dynamically across byte-range threads
+    to bypass per-SA byte rate limiting and TCP buffer saturation.
     """
+    tokens = access_tokens if isinstance(access_tokens, list) else ([access_tokens] if access_tokens else [])
+    main_token = tokens[0] if tokens else ""
     url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-    headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
+    headers = {"Authorization": f"Bearer {main_token}"} if main_token else {}
     
     # 1. Determine total size
     total_bytes = expected_size
@@ -1019,7 +1022,8 @@ def download_gdrive_stream(file_id: str, access_token: str, dest_path: Path, exp
         end = (start + segment_size - 1) if i < num_threads - 1 else (total_bytes - 1)
         ranges.append((start, end))
 
-    print(f"  ⚡ Launching {num_threads}-Thread Concurrent Byte-Range Downloader ({total_bytes/(1024*1024):.1f} MB)...", flush=True)
+    token_count = len(tokens)
+    print(f"  ⚡ Launching {num_threads}-Thread SA-Mesh Byte-Range Downloader ({total_bytes/(1024*1024):.1f} MB across {token_count} SA tokens)...", flush=True)
 
     progress_lock = threading.Lock()
     stats = {"downloaded": 0}
@@ -1047,20 +1051,20 @@ def download_gdrive_stream(file_id: str, access_token: str, dest_path: Path, exp
     logger_thread = threading.Thread(target=log_progress, daemon=True)
     logger_thread.start()
 
-    # 5. Submit Range Workers to ThreadPoolExecutor
+    # 5. Submit Range Workers with Round-Robin Service Account Tokens
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         futures = [
             executor.submit(
                 download_gdrive_range_segment,
                 file_id,
-                access_token,
+                tokens[(sa_offset + i) % token_count] if token_count > 0 else "",
                 dest_path,
                 start,
                 end,
                 progress_lock,
                 stats
             )
-            for start, end in ranges
+            for i, (start, end) in enumerate(ranges)
         ]
         for future in as_completed(futures):
             future.result()
@@ -1090,18 +1094,19 @@ def run_migration_logic():
     print("🔑 Initializing 3-Dataset Mesh Shard Router...")
     router = MeshRepoRouter(hf_token)
 
-    # 0. Acquire GDrive Access Token from Service Account Mesh
+    # 0. Acquire GDrive Access Token Pool from Service Account Mesh
     sa_list = load_service_accounts_from_supabase_or_env(supabase_url, supabase_key)
-    access_token = ""
+    sa_tokens = []
     if sa_list:
-        print(f"  🔑 Loaded {len(sa_list)} Service Account(s). Attempting to generate GDrive Access Token...")
+        print(f"  🔑 Loaded {len(sa_list)} Service Account(s). Pre-generating SA Mesh Access Token Pool...")
         for sa in sa_list:
             token_candidate = get_gdrive_access_token_from_sa(sa)
             if token_candidate:
-                access_token = token_candidate
-                print(f"  ✅ GDrive SA Access Token successfully acquired using [{sa.get('email')}]!")
-                break
-    
+                sa_tokens.append(token_candidate)
+        if sa_tokens:
+            print(f"  ✅ [SA MESH ACTIVE] {len(sa_tokens)}/{len(sa_list)} Service Account Tokens Active & Ready for Byte-Range Rotation!")
+
+    access_token = sa_tokens[0] if sa_tokens else ""
     if access_token:
         print("  ✅ Ready for authenticated GDrive scanning.")
     else:
@@ -1215,7 +1220,7 @@ def run_migration_logic():
             # Download stream with live progress bar
             print(f"  📥 Streaming from GDrive -> {dest_path.name} (Missing {len(missing_parts)}/{total_parts} chunks)...", flush=True)
             try:
-                download_gdrive_stream(file_id, access_token, dest_path, expected_size=file_size)
+                download_gdrive_stream(file_id, sa_tokens if sa_tokens else access_token, dest_path, expected_size=file_size, sa_offset=file_idx)
             except Exception as dl_err:
                 print(f"  ⚠️ Direct download failed ({dl_err}), skipping...", flush=True)
                 continue
