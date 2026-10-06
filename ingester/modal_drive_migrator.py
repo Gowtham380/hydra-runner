@@ -97,7 +97,7 @@ def clean_movie_title(raw_title: str) -> str:
     # Remove telegram handles or @mentions at start
     s = re.sub(r'^@[A-Za-z0-9_.]+\s*', '', s)
     
-    # Remove bracketed domain/site tags at start like [www.1TamilMV.live], [Movieztamizha], [CMC]
+    # Remove bracketed domain/site tags at start like [www.1TamilMV.live], [Movieztamizha], [CMC], [L]
     s = re.sub(r'^\s*\[[^\]]*\]\s*[-_:]?\s*', '', s)
     s = re.sub(r'^\s*\([^\)]*\)\s*[-_:]?\s*', '', s)
 
@@ -106,7 +106,9 @@ def clean_movie_title(raw_title: str) -> str:
         # Domains: www.something.ext, http://, https://
         r'^(?:https?://)?(?:www\.)?[a-z0-9\.-]+\.[a-z]{2,6}(?:\.[a-z]{2})?\s*[-:_]*\s*',
         # Known site & release group names at start of title
-        r'^(?:1tamilmv|tamilmv|movieztamizha|omgxmovies|sam\s*dub\s*lezha|sam\s*dub|lezha|crazymoviescmc|crazymovies|cmc|smd|gtm|tgstream|tglezha|blura|isaimini|kuttymovies|tamilrockers|tamildbox|tamilblasters|tamildub|tamilgun|tamilyogi|tamilprint|tamilplay|moviesda|movieswood|moviesnation|moviezaddiction|moviez|omgmovies|omg|klwap|mallumv|bolly4u|worldfree4u|9xmovies|7starhd|filmyzilla|filmywap|desiremovies|hdhub4u|vegamovies|vega\s*movies|sdmoviespoint|katmoviehd|skymovies|ssrflix)\s*[-:_]*\s*'
+        r'^(?:1tamilmv|tamilmv|movieztamizha|omgxmovies|sam\s*dub\s*lezha|sam\s*dub|lezha|crazymoviescmc|crazymovies|cmc|smd|gtm|tgstream|tglezha|blura|isaimini|kuttymovies|tamilrockers|tamildbox|tamilblasters|tamildub|tamilgun|tamilyogi|tamilprint|tamilplay|moviesda|movieswood|moviesnation|moviezaddiction|moviez|omgmovies|omg|klwap|mallumv|bolly4u|worldfree4u|9xmovies|7starhd|filmyzilla|filmywap|desiremovies|hdhub4u|vegamovies|vega\s*movies|sdmoviespoint|katmoviehd|skymovies|ssrflix)\s*[-:_]*\s*',
+        # Standalone L / L- / L_ / [L] prefix tags
+        r'^\s*\[?[lL]\]?\s+[-_:]?\s*'
     ]
 
     for _ in range(5):
@@ -123,9 +125,9 @@ def clean_movie_title(raw_title: str) -> str:
 
 def sanitize_movie_title(raw_filename: str):
     """
-    Parses title, release year, resolution/quality, and generates clean slug key.
-    Aggressively strips unwanted site prefixes (www, TamilMV, Movieztamizha, Sam Dub Lezha, Omgxmovies, etc.)
-    so title starts directly with the movie name.
+    Parses clean canonical title, release year, resolution/quality, and generates master slug key.
+    Aggressively strips unwanted site prefixes, file size noise (MB/GB), resolution tags, and uploader labels
+    so multiple files for the same movie resolve to the EXACT SAME Master Canonical Movie Slug.
     """
     stem = Path(raw_filename).stem
     stem = clean_movie_title(stem)
@@ -145,9 +147,17 @@ def sanitize_movie_title(raw_filename: str):
     year_match = re.search(r'\(?((?:19|20)\d{2})\)?', stem)
     year = year_match.group(1) if year_match else ""
 
-    # Clean Name
+    # Check if TV Series / Anime Episode
+    ep_match = re.search(r'(?i)\b(s\d+e\d+|ep?\d+|episode\s*\d+|day\s*\d+)\b', stem)
+    is_episode = bool(ep_match)
+
+    # Clean Name: Strip bracketed noise & file size tags (e.g. 400MB, 700MB, 2GB, 14.7GB)
     cleaned = re.sub(r'\[.*?\]|\(.*?\)', ' ', stem)
-    cleaned = re.sub(r'(?i)\b(1080p|720p|480p|2160p|4k|bluray|web-dl|webrip|predvd|hdrip|dvdrip|x264|x265|hevc|aac|esub|h264|hq|org|aud|dd5|1|repack|dual|multi|clean|smd|lezha|blura|dub|hin|eng|tam|tel|mal|kan)\b', ' ', cleaned)
+    cleaned = re.sub(r'(?i)\b\d+(\.\d+)?\s*(gb|mb|g|m)\b', ' ', cleaned)
+    cleaned = re.sub(r'(?i)\b(1080p|720p|480p|2160p|4k|bluray|web-dl|webrip|predvd|hdrip|dvdrip|x264|x265|hevc|aac|esub|esubs|h264|hq|org|aud|dd5|1|repack|dual|multi|clean|smd|lezha|blura|dub|hin|eng|tam|tel|mal|kan|hdr|sdr|true|avc|uncut|line|hdtv|v2|tamil|telugu|hindi|kannada|malayalam|english)\b', ' ', cleaned)
+    
+    # Strip standalone L prefix if left at beginning
+    cleaned = re.sub(r'(?i)^\s*l\s+', '', cleaned)
     cleaned = re.sub(r'[@_.\-+]', ' ', cleaned)
     cleaned = ' '.join(cleaned.split()).strip()
 
@@ -158,7 +168,10 @@ def sanitize_movie_title(raw_filename: str):
     slug_base = re.sub(r'[^a-z0-9\s-]', '', slug_base)
     slug_base = re.sub(r'\s+', '-', slug_base).strip('-')
 
-    if year and year not in slug_base:
+    if is_episode:
+        slug = slug_base
+        clean_title = cleaned.title()
+    elif year and year not in slug_base:
         slug = f"{slug_base}-{year}"
         clean_title = f"{cleaned.title()} ({year})"
     else:
