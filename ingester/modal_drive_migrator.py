@@ -137,14 +137,19 @@ def clean_movie_title(raw_title: str) -> str:
 def extract_file_metadata(raw_filename: str) -> dict:
     """
     Extracts resolution quality, rip_type (PreDVD, BluRay, WEB-DL, etc.), codec, 
-    audio languages, and UI quality_label directly from the raw GDrive filename.
+    audio languages, UI quality_label, and is_theater_print flag directly from the raw GDrive filename.
     """
     text = raw_filename.lower()
     
-    # 1. Rip Type Detection with word boundaries
+    # 1. Rip Type & Theater Print Detection
+    is_theater_print = False
     rip_type = "WEB-DL"
-    if re.search(r'\b(predvd|pre-dvd|dvdscr)\b', text):
-        rip_type = "PreDVD"
+    if re.search(r'\b(predvd|pre-dvd|pre_dvd|dvdscr|camrip|hdcam|cam|hdts|telecine|tc|ts|theatreprint|theaterprint|hallprint|line-audio|screener)\b', text):
+        is_theater_print = True
+        if re.search(r'\b(camrip|hdcam|cam|hdts|telecine|tc|ts)\b', text):
+            rip_type = "CAM/TS"
+        else:
+            rip_type = "PreDVD"
     elif re.search(r'\bimax\b', text):
         rip_type = "IMAX Edition"
     elif re.search(r'\b(bluray|blu-ray|bdrip|bd-rip|brrip|br-rip|br|bdr)\b', text):
@@ -157,8 +162,6 @@ def extract_file_metadata(raw_filename: str) -> dict:
         rip_type = "HDRip"
     elif re.search(r'\b(dvdrip|dvd-rip|dvdr)\b', text):
         rip_type = "DVDRip"
-    elif re.search(r'\b(camrip|hdcam|cam|hdts|telecine|tc|ts)\b', text):
-        rip_type = "CAM/TS"
     elif re.search(r'\b(hdtv|hdtvrip)\b', text):
         rip_type = "HDTV"
 
@@ -212,23 +215,24 @@ def extract_file_metadata(raw_filename: str) -> dict:
         "rip_type": rip_type,
         "codec": codec,
         "audio_languages": langs,
-        "quality_label": quality_label
+        "quality_label": quality_label,
+        "is_theater_print": is_theater_print
     }
 
 
 def sanitize_movie_title(raw_filename: str):
     """
     Parses clean canonical title, release year, resolution/quality, metadata dictionary, and master slug key.
-    Uses 4-step delimiter normalization to ensure zero-noise titles & exact slug canonicalization.
+    Uses master noise pattern stripping all audio bitrates, channels, codecs, languages, and rip sources.
     """
     extracted_meta = extract_file_metadata(raw_filename)
     stem = Path(raw_filename).stem
 
-    # 1. Strip domain prefixes FIRST while dots are intact
+    # 1. Strip domain prefixes FIRST while dots are intact (handles any TLD e.g. .capital, .lease, .cz, .org, etc.)
     for _ in range(3):
         stem = re.sub(r'^(?:https?://)?(?:www\.)?[a-z0-9\.-]+\.[a-z]{2,15}\s*[-:_]*\s*', '', stem, flags=re.IGNORECASE).strip()
-        stem = re.sub(r'^(?:1tamilmv|tamilmv|movieztamizha|isaimini|kuttymovies|tamilrockers|tamilblasters|omgxmovies|crazymoviescmc|vegamovies|bolly4u|9xmovies|filmyzilla|katmoviehd)\s*[-:_]*\s*', '', stem, flags=re.IGNORECASE).strip()
-        stem = re.sub(r'^\s*\[?\s*(l|copy of|tgstream)\s*\]?\s*[-_:]*\s*', '', stem, flags=re.IGNORECASE).strip()
+        stem = re.sub(r'^(?:1tamilmv|tamilmv|movieztamizha|isaimini|kuttymovies|tamilrockers|tamilblasters|omgxmovies|crazymoviescmc|vegamovies|bolly4u|9xmovies|filmyzilla|katmoviehd)\.[a-z]{2,15}\s*[-:_]*\s*', '', stem, flags=re.IGNORECASE).strip()
+        stem = re.sub(r'^\s*\[?\s*(l|copy of|tgstream|smd|gtm)\s*\]?\s*[-_:]*\s*', '', stem, flags=re.IGNORECASE).strip()
 
     # 2. Extract Year (19XX or 20XX)
     year_match = re.search(r'\b((?:19|20)\d{2})\b', stem)
@@ -238,15 +242,34 @@ def sanitize_movie_title(raw_filename: str):
     ep_match = re.search(r'(?i)\b(s\d+e\d+|ep?\d+|episode\s*\d+|day\s*\d+)\b', stem)
     is_episode = bool(ep_match)
 
-    # 3. Delimiter Normalization (Replace -, _, ., +, [, ], (, ), @, # with spaces)
-    s = re.sub(r'[@_.\-+#\[\]\(\)]', ' ', stem)
+    # 3. Canonical Title Extraction: If Year exists and not an episode, slice stem BEFORE year!
+    if year and not is_episode:
+        raw_title_part = re.split(r'\b' + year + r'\b', stem)[0]
+    else:
+        raw_title_part = stem
 
-    # 4. Strip noise tags and codecs (including esu, esub, br, bd, hq, etc.)
-    noise_pattern = r'(?i)\b(br-rip|brrip|bd-rip|bdrip|bluray|blu-ray|web-dl|webdl|web-rip|webrip|hd-rip|hdrip|dvd-rip|dvdrip|pre-dvd|predvd|hd-ts|hdts|cam-rip|camrip|hdcam|telecine|esubtitle|esubtitles|esubs|esub|msubs|msub|softsub|hardsub|nosub|hcsub|multi-audio|clean-audio|org-audio|clean-aud|tam-dub|hin-dub|tel-dub|mal-dub|directors-cut|director-cut|special-edition|hq-hdrip|hq\s*clean|2160p|1080p|720p|480p|360p|240p|4k|uhd|fhd|sd|hdr10plus|hdr10\+|hdr10|hdr|sdr|10bit|8bit|x264|x265|hevc|h264|h265|avc|av1|xvid|divx|aac2\.0|aac5\.1|ac3|eac3|ddp5\.1|dd5\.1ch|dd5\.1|ddp|dd5|dts-hd|dts|truehd|atmos|mp3|flac|opus|2ch|6ch|8ch|5\.1|7\.1|2\.0|repack|proper|v2|v3|v4|uncut|unrated|extended|remastered|imax|hq|lq|clean|org|line|dubbed|dub|multiaudio|multi|dual|tam|tamil|hin|hindi|tel|telugu|mal|malayalam|kan|kannada|eng|english|br|bd|bdr|dvd|dvdr|r5|cam|tc|ts|hdtvrip|hdtv|pdtv|vodrip|ppvrip|esu|esub)\b'
-    s = re.sub(noise_pattern, ' ', s)
+    # 4. Comprehensive Noise Cleaning on Title Part
+    s = raw_title_part
+    s = re.sub(r'\[.*?\]|\(.*?\)', ' ', s)
+
+    master_noise_pattern = r'(?i)\b(' + '|'.join([
+        r'\d+\s*(kbps|kb|k|khz)', r'(16bit|24bit)',
+        r'dd\+?[\d\.]*', r'ddp[\d\.]*', r'aac[\d\.]*', r'ac3', r'eac3', r'dts[\-\w]*', r'atmos', r'truehd', r'flac', r'opus', r'mp3',
+        r'[\d\.]+\s*ch', r'5\.1', r'7\.1', r'2\.0',
+        r'clean-audio', r'org-audio', r'org-aud', r'clean-aud', r'line-audio', r'line-aud', r'dubbed', r'dub', r'multiaudio', r'multi-audio', r'dual-audio', r'dual', r'org', r'aud',
+        r'tam', r'tamil', r'tel', r'telugu', r'hin', r'hindi', r'mal', r'malayalam', r'kan', r'kannada', r'eng', r'english', r'mar', r'marathi', r'ben', r'bengali', r'pun', r'punjabi', r'spa', r'spanish', r'fre', r'french', r'ger', r'german', r'kor', r'korean', r'jap', r'japanese',
+        r'esub[\w]*', r'msub[\w]*', r'softsub[\w]*', r'hardsub[\w]*', r'nosub[\w]*', r'hcsub[\w]*',
+        r'web-dl', r'webdl', r'web-rip', r'webrip', r'web', r'untouched', r'proper-web', r'hdrip', r'hd-rip', r'bluray', r'blu-ray', r'bdrip', r'brrip', r'dvdrip', r'predvd', r'pre-dvd', r'camrip', r'hdcam', r'hdts', r'telecine', r'ts', r'tc', r'hdtvrip', r'hdtv',
+        r'hq', r'lq', r'clean', r'repack', r'proper', r'v2', r'v3', r'v4', r'uncut', r'unrated', r'extended', r'remastered', r'imax', r'hdr10plus', r'hdr10\+', r'hdr10', r'hdr', r'sdr', r'10bit', r'8bit',
+        r'2160p', r'1080p', r'720p', r'480p', r'360p', r'240p', r'4k', r'uhd', r'fhd', r'hd', r'sd',
+        r'x264', r'x265', r'hevc', r'h264', r'h265', r'avc', r'av1', r'xvid', r'divx'
+    ]) + r')\b'
+
+    s = re.sub(master_noise_pattern, ' ', s)
     s = re.sub(r'(?i)\b\d+(\.\d+)?\s*(gb|mb|g|m)\b', ' ', s)
+    s = re.sub(r'[@_.\-+#\[\]\(\)]', ' ', s)
 
-    # 5. Filter words & strip standalone noise tokens
+    # Filter short noise tokens
     valid_short_words = {'it', 'up', 'ai', 'go', 'me', 'we', 'no', 'my', 'be', 'do', 'if', 'in', 'is', 'of', 'on', 'or', 'to', 'us', 'vs', 'ii', 'iii', 'iv', 'v'}
     words = [w for w in s.split() if w.strip()]
     clean_words = []
@@ -254,14 +277,12 @@ def sanitize_movie_title(raw_filename: str):
         wl = w.lower()
         if len(w) <= 2 and wl not in valid_short_words and not w.isdigit():
             continue
-        if wl in {'esub', 'msub', 'brrip', 'bdrip', 'webdl', 'webrip', 'predvd', 'hdrip', 'dvdrip', 'x264', 'x265', 'hevc', 'aac', 'clean', 'hq', 'esu', 'br', 'bd', 'l'}:
+        if wl in {'esub', 'msub', 'brrip', 'bdrip', 'webdl', 'webrip', 'predvd', 'hdrip', 'dvdrip', 'x264', 'x265', 'hevc', 'aac', 'clean', 'hq', 'esu', 'br', 'bd', 'l', 'web', 'untouched'}:
             continue
         clean_words.append(w)
 
     clean_title = ' '.join(clean_words).strip()
-    if year:
-        clean_title = re.sub(r'\b' + year + r'\b', '', clean_title).strip()
-    clean_title = clean_title.title() if clean_title else stem.title()
+    clean_title = clean_title.title() if clean_words else stem.title()
 
     if is_episode:
         clean_title_with_year = clean_title
