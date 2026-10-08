@@ -1,0 +1,139 @@
+-- ==============================================================================
+-- PROJECT HYDRA - SUPABASE DATABASE SCHEMA (LAYER 2)
+-- ==============================================================================
+
+-- Enable UUID extension if not already enabled
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- ------------------------------------------------------------------------------
+-- 1. MOVIES TABLE
+-- Stores content metadata and the spoofed Hugging Face Git LFS raw file URLs.
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.movies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title VARCHAR(255) NOT NULL,
+    slug VARCHAR(255) UNIQUE NOT NULL,
+    file_name VARCHAR(255) NOT NULL, -- Real movie file name (e.g. Avatar.The.Way.of.Water.2022.2160p.mkv)
+    mime_type VARCHAR(100) NOT NULL DEFAULT 'video/x-matroska', -- video/x-matroska or video/mp4
+    file_size_bytes BIGINT NOT NULL, -- Size in bytes (e.g., 42949672960 for 40GB)
+    hf_raw_url TEXT NOT NULL, -- Hugging Face raw LFS URL (e.g., https://huggingface.co/datasets/org/repo/resolve/main/movie.bin)
+    chunk_urls TEXT[], -- Array of 100MB chunk URLs for obfuscated parallel downloading
+    obfuscated BOOLEAN DEFAULT TRUE, -- Indicates XOR header obfuscation (first 1024 bytes)
+    chunk_size_mb INT DEFAULT 100, -- Chunk size in MB
+    poster_url TEXT,
+    description TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Index for high-performance slug and ID lookups
+CREATE INDEX IF NOT EXISTS idx_movies_slug ON public.movies(slug);
+CREATE INDEX IF NOT EXISTS idx_movies_created_at ON public.movies(created_at DESC);
+
+-- ------------------------------------------------------------------------------
+-- 2. DOWNLOAD_LINKS TABLE
+-- Audit and token tracking table for issued download link tokens (JWT JTI).
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.download_links (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    movie_id UUID NOT NULL REFERENCES public.movies(id) ON DELETE CASCADE,
+    token_jti VARCHAR(255) UNIQUE NOT NULL, -- Unique JWT identifier
+    client_ip VARCHAR(45) NOT NULL, -- Bound client IPv4 or IPv6
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Index for lookup and cleanup operations
+CREATE INDEX IF NOT EXISTS idx_download_links_token_jti ON public.download_links(token_jti);
+CREATE INDEX IF NOT EXISTS idx_download_links_movie_id ON public.download_links(movie_id);
+CREATE INDEX IF NOT EXISTS idx_download_links_expires_at ON public.download_links(expires_at);
+
+-- ------------------------------------------------------------------------------
+-- 3. AUTOMATIC UPDATED_AT TRIGGER
+-- ------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+   NEW.updated_at = NOW();
+   RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS set_movies_updated_at ON public.movies;
+CREATE TRIGGER set_movies_updated_at
+BEFORE UPDATE ON public.movies
+FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ------------------------------------------------------------------------------
+-- 4. ROW LEVEL SECURITY (RLS) POLICIES
+-- Enable RLS and define access controls
+-- ------------------------------------------------------------------------------
+ALTER TABLE public.movies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.download_links ENABLE ROW LEVEL SECURITY;
+
+-- Public Read policy for movies catalog
+CREATE POLICY "Public movies are viewable by everyone" 
+ON public.movies FOR SELECT 
+USING (true);
+
+-- Service Role write policy for download_links
+CREATE POLICY "Service role manages download links" 
+ON public.download_links FOR ALL 
+USING (auth.role() = 'service_role');
+
+-- ------------------------------------------------------------------------------
+-- 5. USERS TABLE (Telegram Profile Synchronization)
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.users (
+    telegram_user_id TEXT PRIMARY KEY,
+    username TEXT DEFAULT '',
+    first_name TEXT DEFAULT '',
+    avatar_url TEXT DEFAULT '',
+    role TEXT DEFAULT 'normal', -- normal, vip, admin, super_admin
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow public select and upsert on users" 
+    ON public.users FOR ALL USING (true) WITH CHECK (true);
+
+-- ------------------------------------------------------------------------------
+-- 6. MOVIE SOURCES TABLE (Multi-Quality Stream Sources)
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.movie_sources (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    movie_id UUID REFERENCES public.movies(id) ON DELETE CASCADE,
+    quality TEXT NOT NULL DEFAULT '1080p', -- 2160p, 1080p, 720p, 480p
+    file_name TEXT NOT NULL,
+    file_size_bytes BIGINT NOT NULL,
+    hf_raw_url TEXT NOT NULL,
+    chunk_urls TEXT[],
+    audio_languages TEXT DEFAULT 'Tamil',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_movie_sources_lookup ON public.movie_sources(movie_id, quality);
+ALTER TABLE public.movie_sources ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow public select on movie_sources" ON public.movie_sources FOR SELECT USING (true);
+
+-- ------------------------------------------------------------------------------
+-- 7. USER WATCH HISTORY TABLE (Continue Watching Telemetry Engine)
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.user_watch_history (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    telegram_user_id TEXT NOT NULL,
+    movie_id UUID REFERENCES public.movies(id) ON DELETE CASCADE,
+    progress_seconds INTEGER NOT NULL DEFAULT 0,
+    duration_seconds INTEGER NOT NULL DEFAULT 0,
+    last_watched_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT user_watch_history_user_movie_key UNIQUE (telegram_user_id, movie_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_watch_history_lookup 
+    ON public.user_watch_history(telegram_user_id, last_watched_at DESC);
+
+ALTER TABLE public.user_watch_history ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow public select and upsert on user_watch_history" 
+    ON public.user_watch_history FOR ALL USING (true) WITH CHECK (true);
+

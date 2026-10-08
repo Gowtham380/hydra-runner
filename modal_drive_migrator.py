@@ -134,7 +134,7 @@ def clean_movie_title(raw_title: str) -> str:
     return s
 
 
-def extract_file_metadata(raw_filename: str) -> dict:
+def extract_file_metadata(raw_filename: str, file_size_bytes: int = 0) -> dict:
     """
     Extracts resolution quality, rip_type (PreDVD, BluRay, WEB-DL, etc.), codec, 
     audio languages, UI quality_label, and is_theater_print flag directly from the raw GDrive filename.
@@ -165,8 +165,7 @@ def extract_file_metadata(raw_filename: str) -> dict:
     elif re.search(r'\b(hdtv|hdtvrip)\b', text):
         rip_type = "HDTV"
 
-    # 2. Quality Resolution
-    quality = "1080p"
+    # 2. Quality Resolution (Always store resolution code e.g. 720p/1080p/4K/480p)
     if re.search(r'\b(2160p|4k|uhd)\b', text):
         quality = "2160p"
     elif re.search(r'\b(1080p|fhd)\b', text):
@@ -175,8 +174,16 @@ def extract_file_metadata(raw_filename: str) -> dict:
         quality = "720p"
     elif re.search(r'\b(480p|sd|360p|240p)\b', text):
         quality = "480p"
-    elif rip_type in ("PreDVD", "CAM/TS"):
-        quality = "PreDVD"
+    else:
+        # Fallback estimation via file_size_bytes if available
+        if file_size_bytes > 1_500_000_000:
+            quality = "1080p"
+        elif file_size_bytes > 700_000_000:
+            quality = "720p"
+        elif file_size_bytes > 0:
+            quality = "480p"
+        else:
+            quality = "720p"
 
     # 3. Codec Detection
     codec = "x264"
@@ -198,14 +205,14 @@ def extract_file_metadata(raw_filename: str) -> dict:
     if not langs: langs = ["Tamil"]
 
     # 5. Formatted UI Quality Label
-    if quality == "2160p":
+    if is_theater_print or rip_type in ("PreDVD", "CAM/TS"):
+        quality_label = f"PRE-DVD {quality.upper()} HQ"
+    elif quality == "2160p":
         quality_label = f"4K ULTRA HD ({rip_type})"
     elif quality == "1080p":
         quality_label = f"1080P FULL HD ({rip_type})"
     elif quality == "720p":
         quality_label = f"720P HD ({rip_type})"
-    elif quality == "PreDVD":
-        quality_label = f"PRE-DVD HQ ({rip_type})"
     else:
         quality_label = f"480P SD ({rip_type})"
 
@@ -1045,9 +1052,17 @@ def get_gdrive_access_token_from_sa(sa: dict) -> str:
 
 
 def fetch_gdrive_folder_files(folder_id: str, access_token: str = "") -> list:
-    """Fetch video files from Google Drive API"""
+    """Fetch video files from Google Drive API across one or more folder IDs (comma-separated)"""
     if not folder_id:
         return []
+    
+    if "," in folder_id:
+        fids = [fid.strip() for fid in folder_id.split(",") if fid.strip()]
+        all_combined = []
+        for fid in fids:
+            all_combined.extend(fetch_gdrive_folder_files(fid, access_token))
+        return all_combined
+
     headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
     api_key = os.getenv("GOOGLE_API_KEY", "")
     query = f"'{folder_id}' in parents and trashed = false"

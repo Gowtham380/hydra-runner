@@ -1,0 +1,14 @@
+{
+  "name": "hydra-edge-gateway",
+  "version": "1.0.0",
+  "description": "Zero-OpEx High-Speed Stream Piping Edge Gateway for Project Hydra",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.100.0"
+  }
+}

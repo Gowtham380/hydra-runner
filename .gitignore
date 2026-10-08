@@ -1,0 +1,38 @@
+# Environment variables & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+SERVICE_ACCOUNTS_JSON.txt
+keys/
+.wrangler/
+output.txt
+.vite/
+
+
+
+
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Build outputs
+dist/
+build/
+frontend/dist/
+
+# Python cache & temporary files
+__pycache__/
+*.pyc
+.pytest_cache/
+*.tmp
+*.bin
+*.media
+
+# Logs
+*.log
+npm-debug.log*
+
+# System files
+.DS_Store
+Thumbs.db

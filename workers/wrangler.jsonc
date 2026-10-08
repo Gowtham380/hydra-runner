@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "smd-hydra-edge-proxy",
+  "main": "edge_stream_proxy.js",
+  "compatibility_date": "2026-09-26",
+  "observability": {
+    "enabled": true
+  }
+}
