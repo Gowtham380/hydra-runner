@@ -553,7 +553,7 @@ def process_batch_ingestion(source_input: str, base_repo_id: str, hf_token: str,
 
     for idx, item in enumerate(video_items, 1):
         raw_filename = item["name"]
-        clean_title, sanitized_filename, slug, quality = sanitize_movie_title(raw_filename)
+        clean_title, sanitized_filename, slug, quality, *_ = sanitize_movie_title(raw_filename)
 
         print(f"\n[{idx}/{len(video_items)}] Processing: {clean_title}")
         print(f"  ├─ Original File: {raw_filename}")

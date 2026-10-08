@@ -186,7 +186,7 @@ def run_fast_reconcile_and_repair():
     for item in gdrive_files:
         raw_name = item.get("name", "")
         file_size = int(item.get("size", 0))
-        clean_title, sanitized_filename, slug, quality = sanitize_movie_title(raw_name)
+        clean_title, sanitized_filename, slug, quality, *_ = sanitize_movie_title(raw_name)
         processed_slugs.add(slug)
 
         total_parts = max(1, math.ceil(file_size / DEFAULT_CHUNK_SIZE)) if file_size > 0 else 1

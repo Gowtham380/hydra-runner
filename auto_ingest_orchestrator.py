@@ -60,7 +60,7 @@ def normalize_and_deduplicate_gdrive_files(gdrive_files: list) -> dict:
     for item in gdrive_files:
         raw_name = item.get("name", "")
         file_size = int(item.get("size", 0))
-        clean_title, sanitized_filename, slug, quality = sanitize_movie_title(raw_name)
+        clean_title, sanitized_filename, slug, quality, *_ = sanitize_movie_title(raw_name)
         key = (slug, quality)
 
         if key not in gdrive_map or file_size > gdrive_map[key].get("size_bytes", 0):
