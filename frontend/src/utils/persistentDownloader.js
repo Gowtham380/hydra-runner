@@ -231,7 +231,10 @@ export const cancelPersistentDownload = deleteDownloadRecord;
  */
 export function subscribeDownloads(callback) {
   subscribers.add(callback);
-  getAllDownloadRecords().then(records => callback(records));
+  getAllDownloadRecords().then(records => {
+    callback(records);
+    autoResumeActiveDownloads();
+  });
   return () => subscribers.delete(callback);
 }
 
@@ -308,22 +311,42 @@ if (typeof window !== 'undefined') {
   // Auto-resume active downloads on page refresh/initial load
   setTimeout(() => {
     autoResumeActiveDownloads();
-  }, 1000);
+  }, 300);
+
+  setTimeout(() => {
+    autoResumeActiveDownloads();
+  }, 1200);
 }
 
 /**
- * AUTO-RESUME ENGINE ON PAGE RELOAD
+ * AUTO-RESUME ENGINE ON PAGE RELOAD / REFRESH
+ * Automatically resumes all uncompleted downloads when the page reloads or refreshes.
  */
 export async function autoResumeActiveDownloads() {
   try {
     const records = await getAllDownloadRecords();
     for (const rec of records) {
-      if (rec.status === 'downloading') {
+      const pct = parseFloat(rec.percentage || rec.progress || 0);
+      const isFinished = rec.status === 'completed' || pct >= 100;
+
+      if (!isFinished) {
         const fileIdStr = String(rec.id);
         const existingController = activeControllers.get(fileIdStr);
+        
+        // If download controller is missing or aborted, auto-resume downloading
         if (!existingController || existingController.signal.aborted) {
-          console.log(`[HydraEngine] Auto-resuming download for ${rec.fileName || rec.id} after refresh...`);
-          startOrResumePersistentDownload(rec.movie, rec.urls);
+          console.log(`[HydraEngine] Auto-resuming download for "${rec.fileName || rec.id}" (${pct.toFixed(2)}%) on refresh...`);
+          const targetMovie = rec.movie || { 
+            id: rec.id, 
+            title: rec.fileName, 
+            file_name: rec.fileName, 
+            file_size_bytes: rec.totalFileSize 
+          };
+          const targetUrls = (rec.urls && rec.urls.length > 0) 
+            ? rec.urls 
+            : (targetMovie.chunk_urls || (targetMovie.stream_url ? [targetMovie.stream_url] : []));
+          
+          startOrResumePersistentDownload(targetMovie, targetUrls);
         }
       }
     }
