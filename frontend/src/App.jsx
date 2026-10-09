@@ -63,30 +63,64 @@ export default function App() {
     loadCatalog();
   }, []);
 
-  // Sync URL dynamic routing (/movie/:slug or ?movie=:slug)
-  useEffect(() => {
-    if (groupedMovies.length === 0) return;
+  const handleOpenDownloads = () => {
+    setSelectedGroup(null);
+    setCurrentView('downloads');
+    if (window.location.pathname !== '/downloads') {
+      window.history.pushState({ view: 'downloads' }, '', '/downloads');
+    }
+  };
 
+  const handleOpenProfile = () => {
+    setSelectedGroup(null);
+    setCurrentView('profile');
+    if (window.location.pathname !== '/profile') {
+      window.history.pushState({ view: 'profile' }, '', '/profile');
+    }
+  };
+
+  // Sync URL dynamic routing (/movie/:slug, /downloads, /profile, /)
+  useEffect(() => {
     const handleLocationChange = () => {
       const path = window.location.pathname;
       const searchParams = new URLSearchParams(window.location.search);
       const querySlug = searchParams.get('movie');
 
+      if (path === '/downloads') {
+        setSelectedGroup(null);
+        setCurrentView('downloads');
+        return;
+      }
+
+      if (path === '/profile') {
+        setSelectedGroup(null);
+        setCurrentView('profile');
+        return;
+      }
+
       if (path.startsWith('/movie/')) {
         const slug = path.replace('/movie/', '').trim();
-        const found = groupedMovies.find(g => g.slug === slug || g.master_id === slug);
-        if (found) {
-          setSelectedGroup(found);
-          return;
+        if (groupedMovies.length > 0) {
+          const found = groupedMovies.find(g => g.slug === slug || g.master_id === slug);
+          if (found) {
+            setSelectedGroup(found);
+            setCurrentView('catalog');
+            return;
+          }
         }
-      } else if (querySlug) {
+      } else if (querySlug && groupedMovies.length > 0) {
         const found = groupedMovies.find(g => g.slug === querySlug || g.master_id === querySlug);
         if (found) {
           setSelectedGroup(found);
+          setCurrentView('catalog');
           return;
         }
       }
-      setSelectedGroup(null);
+
+      if (path === '/' || path === '') {
+        setSelectedGroup(null);
+        setCurrentView('catalog');
+      }
     };
 
     handleLocationChange();
@@ -104,14 +138,19 @@ export default function App() {
     }
 
     setSelectedGroup(targetGroup);
+    setCurrentView('catalog');
     const targetSlug = targetGroup.slug || targetGroup.master_id;
-    window.history.pushState({ slug: targetSlug }, '', `/movie/${targetSlug}`);
+    if (window.location.pathname !== `/movie/${targetSlug}`) {
+      window.history.pushState({ slug: targetSlug }, '', `/movie/${targetSlug}`);
+    }
   };
 
   const handleBackToCatalog = () => {
     setSelectedGroup(null);
     setCurrentView('catalog');
-    window.history.pushState(null, '', '/');
+    if (window.location.pathname !== '/') {
+      window.history.pushState(null, '', '/');
+    }
   };
 
   if (isPlayerGate) {
@@ -167,11 +206,6 @@ export default function App() {
     }
 
     if (selectedGroup) {
-      const handleOpenDownloads = () => {
-        setSelectedGroup(null);
-        setCurrentView('downloads');
-      };
-
       if (selectedGroup.type === 'series') {
         return (
           <SeriesDetailsPage
@@ -320,17 +354,10 @@ export default function App() {
         activeCategory={activeCategory}
         setActiveCategory={(cat) => {
           setActiveCategory(cat);
-          setCurrentView('catalog');
-          setSelectedGroup(null);
+          handleBackToCatalog();
         }}
-        onOpenProfile={() => {
-          setSelectedGroup(null);
-          setCurrentView('profile');
-        }}
-        onOpenDownloads={() => {
-          setSelectedGroup(null);
-          setCurrentView('downloads');
-        }}
+        onOpenProfile={handleOpenProfile}
+        onOpenDownloads={handleOpenDownloads}
       />
 
       {/* Dynamic Main View */}
@@ -339,19 +366,12 @@ export default function App() {
       {/* Mobile Glassmorphic Bottom Dock Navigation - Always Persistent */}
       <BottomNav
         onOpenSearch={() => setShowSearch(true)}
-        onOpenProfile={() => {
-          setSelectedGroup(null);
-          setCurrentView('profile');
-        }}
-        onOpenDownloads={() => {
-          setSelectedGroup(null);
-          setCurrentView('downloads');
-        }}
+        onOpenProfile={handleOpenProfile}
+        onOpenDownloads={handleOpenDownloads}
         activeCategory={activeCategory}
         setActiveCategory={(cat) => {
           setActiveCategory(cat);
-          setCurrentView('catalog');
-          setSelectedGroup(null);
+          handleBackToCatalog();
         }}
         onGoHome={handleBackToCatalog}
         currentView={currentView}
