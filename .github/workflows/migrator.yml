@@ -1,4 +1,4 @@
-name: Project Hydra Automated Migration Engine
+name: Project Hydra Automated Migration Engine (Matrix Shard Pipeline)
 
 on:
   schedule:
@@ -8,9 +8,13 @@ on:
 
 jobs:
   migrate:
-    name: Run GDrive to Hugging Face Migration
+    name: Shard Runner (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 360 # Maximum allowed 6-hour runner limit
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     steps:
       - name: Checkout Codebase
@@ -27,12 +31,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install huggingface_hub requests python-dotenv cryptography google-auth google-api-python-client
 
-      - name: Execute Migration Engine
+      - name: Execute Matrix Shard Migration Engine
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           SERVICE_ACCOUNTS_JSON: ${{ secrets.SERVICE_ACCOUNTS_JSON }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          TOTAL_SHARDS: 4
         run: |
           python ingester/modal_drive_migrator.py

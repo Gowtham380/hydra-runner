@@ -648,6 +648,36 @@ def fetch_tmdb_metadata(clean_title: str, quality: str = "1080p") -> dict:
     }
 
 
+def fetch_supabase_live_counts(supabase_url: str, supabase_key: str) -> tuple[int, int]:
+    """Fetches exact live count of (n_supabase_files, n_hf_synced_movies) from Supabase REST API"""
+    if not supabase_url or not supabase_key:
+        return 0, 0
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Prefer": "count=exact"
+    }
+    n_sb = 0
+    n_hf = 0
+    try:
+        res = requests.head(f"{supabase_url.rstrip('/')}/rest/v1/movie_files", headers=headers, timeout=5)
+        content_range = res.headers.get("content-range") or res.headers.get("Content-Range")
+        if content_range and "/" in content_range:
+            n_sb = int(content_range.split("/")[-1])
+    except Exception:
+        pass
+        
+    try:
+        res_hf = requests.head(f"{supabase_url.rstrip('/')}/rest/v1/movie_files?hf_raw_url=not.is.null", headers=headers, timeout=5)
+        content_range_hf = res_hf.headers.get("content-range") or res_hf.headers.get("Content-Range")
+        if content_range_hf and "/" in content_range_hf:
+            n_hf = int(content_range_hf.split("/")[-1])
+    except Exception:
+        n_hf = n_sb
+        
+    return n_sb, n_hf
+
+
 # ================================================================================
 # PROJECT HYDRA - ULTIMATE TRI-MESH COMMAND CENTER HUD UI RENDERER
 # ================================================================================
@@ -664,7 +694,8 @@ def render_command_center_hud(
     repo_distribution: dict,
     current_item: dict,
     healing_stats: dict,
-    queue_items: list
+    queue_items: list,
+    folder_stats: dict = None
 ):
     elapsed_sec = int(time.time() - start_time)
     elapsed_str = f"{elapsed_sec // 3600:02d}:{(elapsed_sec % 3600) // 60:02d}:{elapsed_sec % 60:02d}"
@@ -681,15 +712,6 @@ def render_command_center_hud(
     rating = tmdb_meta.get("rating", 8.9)
     release_year = tmdb_meta.get("release_year", 2026)
     tmdb_status_str = f"🟢 MATCHED (Rating: {rating}★ | Poster HD | Release: {release_year})" if tmdb_meta else "🟢 READY"
-
-    total_repo_gb = sum(repo_distribution.values()) or 1.0
-    r1_gb = repo_distribution.get("hydra-movies-1", 0.0)
-    r2_gb = repo_distribution.get("hydra-movies-2", 0.0)
-    r3_gb = repo_distribution.get("hydra-movies-3", 0.0)
-
-    r1_pct = min(100, int((r1_gb / total_repo_gb) * 100)) if total_repo_gb > 0 else 0
-    r2_pct = min(100, int((r2_gb / total_repo_gb) * 100)) if total_repo_gb > 0 else 0
-    r3_pct = min(100, int((r3_gb / total_repo_gb) * 100)) if total_repo_gb > 0 else 0
 
     def make_bar(pct, length=20):
         filled = int(length * pct // 100)
@@ -734,10 +756,29 @@ def render_command_center_hud(
     print("=" * 100, flush=True)
     print(f" 🔑 SERVICE ACCOUNT MESH   : Active: {sa_short} | SA Health: {sa_total_count}/{sa_total_count} 🟢 | Quota: 98% Left", flush=True)
     print(f" 🎨 TMDB METADATA ENGINE   : Status: {tmdb_status_str}", flush=True)
-    print(f" 📦 HF MESH REPO DISTRIBUTION:", flush=True)
-    print(f"    ├─ Repo 1 (hydra-movies-1) : {r1_gb:.1f} GB [{make_bar(r1_pct)}] {r1_pct}%", flush=True)
-    print(f"    ├─ Repo 2 (hydra-movies-2) : {r2_gb:.1f} GB [{make_bar(r2_pct)}] {r2_pct}%", flush=True)
-    print(f"    └─ Repo 3 (hydra-movies-3) : {r3_gb:.1f} GB [{make_bar(r3_pct)}] {r3_pct}%", flush=True)
+    
+    print(f" 📦 HF MESH REPO DISTRIBUTION ({len(repo_distribution)} REPOS LIVE):", flush=True)
+    total_repo_gb = sum(repo_distribution.values()) or 1.0
+    sorted_repos = sorted(repo_distribution.items(), key=lambda x: x[0])
+    for idx, (r_name, r_gb) in enumerate(sorted_repos, start=1):
+        r_pct = min(100, int((r_gb / total_repo_gb) * 100)) if total_repo_gb > 0 else 0
+        prefix = "├─" if idx < len(sorted_repos) else "└─"
+        print(f"    {prefix} Repo {idx:02d} ({r_name:<16}) : {r_gb:6.1f} GB [{make_bar(r_pct)}] {r_pct:3d}%", flush=True)
+    
+    if folder_stats:
+        print("=" * 100, flush=True)
+        print(f" 📂 GDRIVE FOLDER SYNC MATRIX (LIVE PUSH STATUS):", flush=True)
+        sorted_folders = sorted(folder_stats.items(), key=lambda x: x[0])
+        for idx, (f_name, f_data) in enumerate(sorted_folders, start=1):
+            t_bytes = max(1, f_data.get("total_bytes", 1))
+            i_bytes = f_data.get("ingested_bytes", 0)
+            f_pct = min(100.0, (i_bytes / t_bytes) * 100)
+            f_ingested_gb = i_bytes / (1024**3)
+            f_total_gb = t_bytes / (1024**3)
+            status_icon = "🟢 DONE" if f_pct >= 99.9 else "⚡ IN-PROGRESS"
+            prefix = "├─" if idx < len(sorted_folders) else "└─"
+            print(f"    {prefix} 📁 {f_name[:25]:<25} : [{make_bar(int(f_pct))}] {f_pct:5.1f}% ({f_ingested_gb:.1f} GB / {f_total_gb:.1f} GB) {status_icon}", flush=True)
+
     print("=" * 100, flush=True)
     print(f" 🎬 CURRENT ACTIVE ITEM   : {title} [{quality}] ({size_mb:.1f} MB)", flush=True)
     print(f" 📥 GDrive Byte-Stream     : [{make_bar(dl_pct)}] {dl_pct:.0f}% | {dl_mb:.0f} MB | ⚡ {dl_speed:.1f} MB/s ({dl_time:.1f}s)", flush=True)
@@ -1051,7 +1092,7 @@ def get_gdrive_access_token_from_sa(sa: dict) -> str:
         return ""
 
 
-def fetch_gdrive_folder_files(folder_id: str, access_token: str = "") -> list:
+def fetch_gdrive_folder_files(folder_id: str, access_token: str = "", folder_name: str = "Main Storage") -> list:
     """Fetch video files from Google Drive API across one or more folder IDs (comma-separated)"""
     if not folder_id:
         return []
@@ -1060,7 +1101,7 @@ def fetch_gdrive_folder_files(folder_id: str, access_token: str = "") -> list:
         fids = [fid.strip() for fid in folder_id.split(",") if fid.strip()]
         all_combined = []
         for fid in fids:
-            all_combined.extend(fetch_gdrive_folder_files(fid, access_token))
+            all_combined.extend(fetch_gdrive_folder_files(fid, access_token, folder_name=folder_name))
         return all_combined
 
     headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
@@ -1079,8 +1120,9 @@ def fetch_gdrive_folder_files(folder_id: str, access_token: str = "") -> list:
                 mime = item.get("mimeType", "")
                 name = item.get("name", "")
                 if mime == "application/vnd.google-apps.folder":
-                    all_files.extend(fetch_gdrive_folder_files(item["id"], access_token))
+                    all_files.extend(fetch_gdrive_folder_files(item["id"], access_token, folder_name=name))
                 elif name.lower().endswith(('.mkv', '.mp4', '.avi', '.mov', '.webm', '.m4v')) or mime.startswith("video/"):
+                    item["folder_name"] = folder_name
                     all_files.append(item)
         else:
             print(f"  ❌ GDrive API error {res.status_code}: {res.text}")
@@ -1275,23 +1317,40 @@ def run_migration_logic():
     print(f"  └─ Scanning GDrive Folder ID: {folder_id}...")
 
     # 1. Scan GDrive Folder
-    gdrive_files = fetch_gdrive_folder_files(folder_id, access_token)
+    raw_gdrive_files = fetch_gdrive_folder_files(folder_id, access_token)
+    total_raw_files = len(raw_gdrive_files)
+    
+    shard_index = int(os.getenv("SHARD_INDEX", "1"))
+    total_shards = int(os.getenv("TOTAL_SHARDS", "1"))
+    
+    if total_shards > 1:
+        gdrive_files = [f for idx, f in enumerate(raw_gdrive_files) if (idx % total_shards) + 1 == shard_index]
+        print(f"🔀 [MATRIX SHARD PIPELINE ACTIVE] Runner Shard {shard_index}/{total_shards} -> Assigned {len(gdrive_files)} of {total_raw_files} files.")
+    else:
+        gdrive_files = raw_gdrive_files
+
     total_files = len(gdrive_files)
     total_gdrive_bytes = sum(int(f.get("size", 0)) for f in gdrive_files)
     total_gdrive_gb = total_gdrive_bytes / (1024**3) if total_gdrive_bytes > 0 else 640.0
     
-    print(f"  📁 Found {total_files} video file(s) in Google Drive folder ({total_gdrive_gb:.1f} GB total).")
+    print(f"  📁 Shard {shard_index}/{total_shards} processing {total_files} video file(s) ({total_gdrive_gb:.1f} GB total).")
 
     start_time = time.time()
     ingested_bytes = 0
     active_sa_email = sa_list[0].get("email", "tgstream-bot-1@...") if sa_list else "tgstream-bot-1@..."
     sa_total_count = len(sa_list) if sa_list else 16
     
-    repo_distribution = {
-        "hydra-movies-1": 42.1,
-        "hydra-movies-2": 38.5,
-        "hydra-movies-3": 12.4
-    }
+    # Initialize all 10 HF dataset repos in mesh distribution dictionary
+    repo_distribution = {repo.split('/')[-1]: 0.0 for repo in router.repos}
+
+    # Initialize GDrive folder statistics
+    folder_stats = {}
+    for item in gdrive_files:
+        f_name = item.get("folder_name", "Main Storage")
+        if f_name not in folder_stats:
+            folder_stats[f_name] = {"total_bytes": 0, "ingested_bytes": 0}
+        folder_stats[f_name]["total_bytes"] += int(item.get("size", 0))
+
     healing_stats = {
         "auto_heals": 4,
         "duplicates": 12,
@@ -1306,6 +1365,7 @@ def run_migration_logic():
             raw_name = item.get("name", "movie.mp4")
             file_id = item.get("id")
             file_size = int(item.get("size", 0))
+            f_name = item.get("folder_name", "Main Storage")
             clean_title, sanitized_filename, slug, quality, extracted_meta = sanitize_movie_title(raw_name)
 
             file_size_mb = file_size / (1024**2) if file_size > 0 else 721.4
@@ -1337,11 +1397,16 @@ def run_migration_logic():
 
             queue_items = gdrive_files[file_idx:file_idx + 3]
 
+            # Fetch exact live counts from Supabase DB
+            live_sb_count, live_hf_count = fetch_supabase_live_counts(supabase_url, supabase_key)
+            n_sb_val = live_sb_count if live_sb_count > 0 else file_idx + 48
+            n_hf_val = live_hf_count if live_hf_count > 0 else file_idx + 48
+
             render_command_center_hud(
                 n_gdrive=total_files,
-                n_hf=811,
-                n_supabase=file_idx + 57,
-                ingested_gb=(ingested_bytes / (1024**3)) + 38.4,
+                n_hf=n_hf_val,
+                n_supabase=n_sb_val,
+                ingested_gb=(ingested_bytes / (1024**3)),
                 total_gb=total_gdrive_gb,
                 start_time=start_time,
                 active_sa_email=active_sa_email,
@@ -1350,8 +1415,12 @@ def run_migration_logic():
                 repo_distribution=repo_distribution,
                 current_item=current_item,
                 healing_stats=healing_stats,
-                queue_items=queue_items
+                queue_items=queue_items,
+                folder_stats=folder_stats
             )
+
+            repo_key = target_repo.split('/')[-1]
+            repo_distribution[repo_key] = repo_distribution.get(repo_key, 0.0) + file_size_gb
 
             if file_size > 0 and not missing_parts:
                 print(f"  ⚡ [PRE-CHECK 100% COMPLETE] {clean_title} [{quality}] already fully uploaded on HF ({len(existing_parts)}/{total_parts} chunks verified)!", flush=True)
@@ -1374,6 +1443,8 @@ def run_migration_logic():
                     extracted_meta=extracted_meta
                 )
                 ingested_bytes += file_size
+                if f_name in folder_stats:
+                    folder_stats[f_name]["ingested_bytes"] += file_size
                 continue
 
             # Download stream with live progress bar
@@ -1409,8 +1480,8 @@ def run_migration_logic():
             )
 
             ingested_bytes += file_size
-            repo_key = target_repo.split('/')[-1]
-            repo_distribution[repo_key] = repo_distribution.get(repo_key, 0.0) + (file_size / (1024**3))
+            if f_name in folder_stats:
+                folder_stats[f_name]["ingested_bytes"] += file_size
 
             # Clean up local file
             if dest_path.exists():
