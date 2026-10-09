@@ -304,6 +304,32 @@ if (typeof window !== 'undefined') {
       }
     }
   });
+
+  // Auto-resume active downloads on page refresh/initial load
+  setTimeout(() => {
+    autoResumeActiveDownloads();
+  }, 1000);
+}
+
+/**
+ * AUTO-RESUME ENGINE ON PAGE RELOAD
+ */
+export async function autoResumeActiveDownloads() {
+  try {
+    const records = await getAllDownloadRecords();
+    for (const rec of records) {
+      if (rec.status === 'downloading') {
+        const fileIdStr = String(rec.id);
+        const existingController = activeControllers.get(fileIdStr);
+        if (!existingController || existingController.signal.aborted) {
+          console.log(`[HydraEngine] Auto-resuming download for ${rec.fileName || rec.id} after refresh...`);
+          startOrResumePersistentDownload(rec.movie, rec.urls);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[HydraEngine] Auto-resume check notice:", err);
+  }
 }
 
 /**
