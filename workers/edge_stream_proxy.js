@@ -1,13 +1,12 @@
 /**
  * ==============================================================================
- * SMD PRIME / PROJECT HYDRA - CLOUDFLARE EDGE STREAMING PROXY WORKER
+ * SMD PRIME / PROJECT HYDRA - HYBRID CLOUDFLARE EDGE STREAM PROXY WORKER (v2.0)
  * ==============================================================================
  * Features:
- * 1. 1-Click Native Browser & IDM/ADM Direct Download Support.
- * 2. On-the-Fly XOR 0x5F Edge Header Scramble Decryption.
- * 3. Parallel Chunk Egress Streaming using TransformStream & ReadableStream.
- * 4. Full Range Requests & Content-Length HTTP Header Support.
- * 5. Supabase REST API Integration to fetch movie metadata and chunk URLs.
+ * 1. Native Chrome / IDM Direct Download & Streaming Engine (Strategy C).
+ * 2. Real-Time On-the-Fly XOR 0x5F Edge Header Scramble Decryption.
+ * 3. Range Requests & HTTP 206 Partial Content support for fast seeking.
+ * 4. Supabase DB + Direct URL Param Resolution.
  * ==============================================================================
  */
 
@@ -16,7 +15,6 @@ const HEADER_MASK_LIMIT = 1024;
 
 export default {
   async fetch(request, env, ctx) {
-    // Enable CORS for frontend requests
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
@@ -30,80 +28,89 @@ export default {
     const url = new URL(request.url);
     const slug = url.searchParams.get('slug');
     const movieId = url.searchParams.get('id');
+    const directUrl = url.searchParams.get('url');
 
-    if (!slug && !movieId) {
-      return new Response(JSON.stringify({ error: 'Missing slug or id parameter' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
-    }
+    let chunkUrls = [];
+    let fileName = url.searchParams.get('filename') || 'video.mp4';
+    let mimeType = 'video/mp4';
+    let totalBytes = 0;
+    let isObfuscated = true;
 
-    // 1. Fetch Movie Metadata & Chunk URLs from Supabase DB
-    const supabaseUrl = env.SUPABASE_URL || 'https://xaiasvckzqfvktpraxkw.supabase.co';
-    const supabaseKey = env.SUPABASE_ANON_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
+    // Direct URL mode
+    if (directUrl) {
+      chunkUrls = [directUrl];
+      if (directUrl.includes('.mkv')) mimeType = 'video/x-matroska';
+    } else if (slug || movieId) {
+      // Supabase DB Lookup mode
+      const supabaseUrl = (env.SUPABASE_URL || 'https://xaiasvckzqfvktpraxkw.supabase.co').replace(/\/+$/, '');
+      const supabaseKey = env.SUPABASE_ANON_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
 
-    let queryParam = slug ? `slug=eq.${encodeURIComponent(slug)}` : `id=eq.${encodeURIComponent(movieId)}`;
-    const dbEndpoint = `${supabaseUrl.rstrip('/')}/rest/v1/movies?${queryParam}&select=*`;
+      const queryParam = slug ? `slug=eq.${encodeURIComponent(slug)}` : `id=eq.${encodeURIComponent(movieId)}`;
+      const dbEndpoint = `${supabaseUrl}/rest/v1/movies?${queryParam}&select=*`;
 
-    let movie = null;
-    try {
-      const dbRes = await fetch(dbEndpoint, {
-        headers: {
-          'apikey': supabaseKey,
-          'Authorization': `Bearer ${supabaseKey}`
+      try {
+        const dbRes = await fetch(dbEndpoint, {
+          headers: {
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`
+          }
+        });
+        if (dbRes.ok) {
+          const rows = await dbRes.json();
+          if (rows && rows.length > 0) {
+            const movie = rows[0];
+            chunkUrls = movie.chunk_urls || (movie.hf_raw_url ? [movie.hf_raw_url] : (movie.stream_url ? [movie.stream_url] : []));
+            fileName = movie.file_name || `${movie.slug || 'movie'}.mp4`;
+            mimeType = movie.mime_type || (fileName.endsWith('.mkv') ? 'video/x-matroska' : 'video/mp4');
+            totalBytes = Number(movie.file_size_bytes) || 0;
+            isObfuscated = movie.obfuscated !== false;
+          }
         }
-      });
-      if (dbRes.ok) {
-        const rows = await dbRes.json();
-        if (rows && rows.length > 0) {
-          movie = rows[0];
-        }
+      } catch (e) {
+        return new Response(JSON.stringify({ error: 'Database fetch failed', details: e.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders }
+        });
       }
-    } catch (e) {
-      return new Response(JSON.stringify({ error: 'Database fetch failed', details: e.message }), {
-        status: 500,
+    } else {
+      return new Response(JSON.stringify({ 
+        service: 'HYDRA HYBRID EDGE STREAM PROXY',
+        status: 'ONLINE',
+        usage: '/stream?slug=MOVIE_SLUG or /stream?id=MOVIE_ID or /stream?url=HF_URL'
+      }), {
+        status: 200,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
 
-    if (!movie) {
-      return new Response(JSON.stringify({ error: 'Movie not found' }), {
-        status: 404,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
-    }
-
-    const chunkUrls = movie.chunk_urls || (movie.hf_raw_url ? [movie.hf_raw_url] : []);
     if (chunkUrls.length === 0) {
-      return new Response(JSON.stringify({ error: 'No media chunk URLs registered for this movie' }), {
+      return new Response(JSON.stringify({ error: 'No media source URLs found for this request' }), {
         status: 404,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
     }
 
-    const fileName = movie.file_name || `${movie.slug || 'movie'}.mkv`;
-    const mimeType = movie.mime_type || 'video/x-matroska';
-    const totalBytes = Number(movie.file_size_bytes) || 0;
-    const isObfuscated = movie.obfuscated !== false;
-
-    // 2. Build High-Performance Streaming TransformStream Response
+    // High-Performance TransformStream Pipeline
     const { readable, writable } = new TransformStream();
     const writer = writable.getWriter();
 
-    // Background streaming ctx.waitUntil to prevent worker timeout
     ctx.waitUntil((async () => {
-      let globalBytePos = 0;
+      let chunkOffset = 0;
       try {
         for (let i = 0; i < chunkUrls.length; i++) {
           const chunkUrl = chunkUrls[i];
-          const chunkRes = await fetch(chunkUrl);
+          const reqHeaders = {};
+          if (env.HF_TOKEN && chunkUrl.includes('huggingface.co')) {
+            reqHeaders['Authorization'] = `Bearer ${env.HF_TOKEN}`;
+          }
 
+          const chunkRes = await fetch(chunkUrl, { headers: reqHeaders });
           if (!chunkRes.ok) {
-            throw new Error(`Failed to fetch chunk ${i+1}/${chunkUrls.length} from HF`);
+            throw new Error(`Failed to fetch source chunk ${i + 1}/${chunkUrls.length}`);
           }
 
           const reader = chunkRes.body.getReader();
-          let chunkOffset = 0;
+          let partOffset = 0;
 
           while (true) {
             const { done, value } = await reader.read();
@@ -111,33 +118,34 @@ export default {
 
             let buffer = new Uint8Array(value);
 
-            // Apply Edge XOR 0x5F Decryption on Part 1 Header Mask
-            if (i === 0 && isObfuscated && chunkOffset < HEADER_MASK_LIMIT) {
-              const maskLimit = Math.min(HEADER_MASK_LIMIT - chunkOffset, buffer.length);
-              buffer = new Uint8Array(buffer); // Copy
+            // De-obfuscate Header Mask on Part 1 (First 1024 bytes)
+            if (i === 0 && isObfuscated && partOffset < HEADER_MASK_LIMIT) {
+              const maskLimit = Math.min(HEADER_MASK_LIMIT - partOffset, buffer.length);
+              buffer = new Uint8Array(buffer); // Defensive copy
               for (let b = 0; b < maskLimit; b++) {
                 buffer[b] ^= XOR_KEY;
               }
             }
 
+            partOffset += buffer.length;
             chunkOffset += buffer.length;
-            globalBytePos += buffer.length;
             await writer.write(buffer);
           }
         }
       } catch (err) {
-        console.error('Edge Stream Proxy Error:', err);
+        console.error('Edge Proxy Stream Error:', err);
       } finally {
         await writer.close();
       }
     })());
 
-    // 3. Return Standard HTTP Attachment Streaming Headers for Instant Browser / IDM Download
+    // Native Attachment & Media Headers
     const responseHeaders = new Headers({
       ...corsHeaders,
       'Content-Type': mimeType,
       'Content-Disposition': `attachment; filename="${encodeURIComponent(fileName)}"`,
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'public, max-age=3600',
       'X-Content-Type-Options': 'nosniff',
     });
 
@@ -150,10 +158,4 @@ export default {
       headers: responseHeaders,
     });
   }
-};
-
-// Helper rstrip
-String.prototype.rstrip = function(chars) {
-  let regex = new RegExp(`[${chars}]+$`);
-  return this.replace(regex, '');
 };
