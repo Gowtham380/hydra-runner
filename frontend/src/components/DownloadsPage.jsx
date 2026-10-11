@@ -561,7 +561,7 @@ export default function DownloadsPage({ onBack }) {
   const handleSaveToDevice = async (rec) => {
     triggerHaptic('notification', 'success');
     setExportToast(`⏳ Assembling & Exporting ${rec.fileName || 'Movie'}...`);
-    await assembleAndTriggerSave(rec.id, rec.fileName, rec.movie?.mime_type || 'video/mp4');
+    await assembleAndTriggerSave(rec.id, rec.fileName, rec.movie?.mime_type || 'video/mp4', rec);
   };
 
   const handleWatchPreview = async (rec) => {

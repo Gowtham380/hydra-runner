@@ -87,7 +87,23 @@ export async function triggerSwMeshDownload(movie, fallbackUrls = []) {
     });
   }
 
-  // Encode metadata in URL query for maximum reliability
+  // High-ROI Cloudflare Edge Stream Proxy Bypass:
+  const edgeWorkerBase = import.meta.env.VITE_EDGE_PROXY_URL || '';
+  if (edgeWorkerBase) {
+    const edgeStreamUrl = `${edgeWorkerBase.replace(/\/+$/, '')}/stream?slug=${encodeURIComponent(slug)}&filename=${encodeURIComponent(payload.file_name)}`;
+    const a = document.createElement('a');
+    a.href = edgeStreamUrl;
+    a.download = payload.file_name;
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      if (document.body.contains(a)) document.body.removeChild(a);
+    }, 1000);
+    return;
+  }
+
+  // Fallback: Local SW-Mesh Range Stream
   const metaParam = encodeURIComponent(JSON.stringify(payload));
   const streamUrl = `/sw-stream/${slug}?meta=${metaParam}`;
 

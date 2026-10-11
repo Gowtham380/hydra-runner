@@ -288,35 +288,15 @@ def download_gdrive_file_stream(file_id: str, access_token: str, dest_path: str,
 
 
 
+try:
+    from ingester.title_sanitizer import sanitize_movie_title as engine_sanitize_movie_title, parse_video_line
+except ImportError:
+    from title_sanitizer import sanitize_movie_title as engine_sanitize_movie_title, parse_video_line
+
+
 def sanitize_movie_title(raw_filename: str) -> tuple[str, str, str, str]:
-    import re
-    name = Path(raw_filename).stem
-    ext = Path(raw_filename).suffix.lower()
-
-    name = re.sub(r'^Copy\s*(\(\d+\))?\s*of\s+', '', name, flags=re.IGNORECASE)
-    name = re.sub(r'^(https?://)?(www\.)?[A-Za-z0-9.-]+\.[A-Za-z]{2,6}(\.[A-Za-z]{2,4})?\s*[-:_]*\s*', '', name, flags=re.IGNORECASE)
-    name = re.sub(r'^@[A-Za-z0-9_.]+\s*', '', name, flags=re.IGNORECASE)
-    name = re.sub(r'\[.*?\]', '', name)
-
-    year_match = re.search(r'\(?(\d{4})\)?', name)
-    year = year_match.group(1) if year_match else ""
-
-    quality = "1080p"
-    if "2160p" in name.lower() or "4k" in name.lower():
-        quality = "2160p"
-    elif "720p" in name.lower():
-        quality = "720p"
-    elif "480p" in name.lower():
-        quality = "480p"
-
-    core_title = re.split(r'hq|hdrip|web-dl|bluray|x264|x265|hevc|dd\+|aac|esub|720p|1080p|2160p|480p', name, flags=re.IGNORECASE)[0]
-    core_title = core_title.replace('.', ' ').replace('_', ' ').strip('- ').strip()
-
-    clean_title = f"{core_title} ({year})" if (year and year not in core_title) else core_title
-    slug_base = re.sub(r'[^\w\s-]', '', clean_title.lower())
-    slug = re.sub(r'[\s_-]+', '-', slug_base).strip('-')
-    sanitized_filename = f"{slug.replace('-', '.')}.{quality}{ext}"
-
+    """Upgraded high-precision sanitizer delegating to central title_sanitizer engine."""
+    clean_title, sanitized_filename, slug, quality, _ = engine_sanitize_movie_title(raw_filename)
     return clean_title, sanitized_filename, slug, quality
 
 
@@ -588,6 +568,12 @@ def run_sync_cycle(source_dir: str, folder_id: str, repo_mgr: ThreadSafeMultiRep
 
     processed_now = 0
     for item in video_items:
+        # Strict Media Validation: Drop non-media junk, trailers, and invalid lines
+        parsed = parse_video_line(item["name"])
+        if not parsed:
+            print(f"  ⏭️ Discarding non-media/unsupported file: '{item['name']}'")
+            continue
+
         clean_title, sanitized_filename, slug, quality = sanitize_movie_title(item["name"])
 
         if check_already_ingested(slug, supabase_url, supabase_key):

@@ -226,88 +226,21 @@ def extract_file_metadata(raw_filename: str, file_size_bytes: int = 0) -> dict:
     }
 
 
+try:
+    from ingester.title_sanitizer import sanitize_movie_title as engine_sanitize_movie_title, parse_video_line
+except (ImportError, ModuleNotFoundError):
+    import sys
+    sys.path.append(str(Path(__file__).parent / "ingester"))
+    from title_sanitizer import sanitize_movie_title as engine_sanitize_movie_title, parse_video_line
+
+
 def sanitize_movie_title(raw_filename: str):
     """
     Parses clean canonical title, release year, resolution/quality, metadata dictionary, and master slug key.
-    Uses master noise pattern stripping all audio bitrates, channels, codecs, languages, and rip sources.
+    Delegates to central high-precision title_sanitizer engine with zero token loss and dual-grammar validation.
     """
-    extracted_meta = extract_file_metadata(raw_filename)
-    stem = Path(raw_filename).stem
+    return engine_sanitize_movie_title(raw_filename)
 
-    # 1. Strip domain prefixes FIRST while dots are intact (handles any TLD e.g. .capital, .lease, .cz, .org, etc.)
-    for _ in range(3):
-        stem = re.sub(r'^(?:https?://)?(?:www\.)?[a-z0-9\.-]+\.[a-z]{2,15}\s*[-:_]*\s*', '', stem, flags=re.IGNORECASE).strip()
-        stem = re.sub(r'^(?:1tamilmv|tamilmv|movieztamizha|isaimini|kuttymovies|tamilrockers|tamilblasters|omgxmovies|crazymoviescmc|vegamovies|bolly4u|9xmovies|filmyzilla|katmoviehd)\.[a-z]{2,15}\s*[-:_]*\s*', '', stem, flags=re.IGNORECASE).strip()
-        stem = re.sub(r'^\s*\[?\s*(l|copy of|tgstream|smd|gtm)\s*\]?\s*[-_:]*\s*', '', stem, flags=re.IGNORECASE).strip()
-
-    # 2. Extract Year (19XX or 20XX)
-    year_match = re.search(r'\b((?:19|20)\d{2})\b', stem)
-    year = year_match.group(1) if year_match else ""
-
-    # Check if TV Series / Anime Episode
-    ep_match = re.search(r'(?i)\b(s\d+e\d+|ep?\d+|episode\s*\d+|day\s*\d+)\b', stem)
-    is_episode = bool(ep_match)
-
-    # 3. Canonical Title Extraction: If Year exists and not an episode, slice stem BEFORE year!
-    if year and not is_episode:
-        raw_title_part = re.split(r'\b' + year + r'\b', stem)[0]
-    else:
-        raw_title_part = stem
-
-    # 4. Comprehensive Noise Cleaning on Title Part
-    s = raw_title_part
-    s = re.sub(r'\[.*?\]|\(.*?\)', ' ', s)
-
-    master_noise_pattern = r'(?i)\b(' + '|'.join([
-        r'\d+\s*(kbps|kb|k|khz)', r'(16bit|24bit)',
-        r'dd\+?[\d\.]*', r'ddp[\d\.]*', r'aac[\d\.]*', r'ac3', r'eac3', r'dts[\-\w]*', r'atmos', r'truehd', r'flac', r'opus', r'mp3',
-        r'[\d\.]+\s*ch', r'5\.1', r'7\.1', r'2\.0',
-        r'clean-audio', r'org-audio', r'org-aud', r'clean-aud', r'line-audio', r'line-aud', r'dubbed', r'dub', r'multiaudio', r'multi-audio', r'dual-audio', r'dual', r'org', r'aud',
-        r'tam', r'tamil', r'tel', r'telugu', r'hin', r'hindi', r'mal', r'malayalam', r'kan', r'kannada', r'eng', r'english', r'mar', r'marathi', r'ben', r'bengali', r'pun', r'punjabi', r'spa', r'spanish', r'fre', r'french', r'ger', r'german', r'kor', r'korean', r'jap', r'japanese',
-        r'esub[\w]*', r'msub[\w]*', r'softsub[\w]*', r'hardsub[\w]*', r'nosub[\w]*', r'hcsub[\w]*',
-        r'web-dl', r'webdl', r'web-rip', r'webrip', r'web', r'untouched', r'proper-web', r'hdrip', r'hd-rip', r'bluray', r'blu-ray', r'bdrip', r'brrip', r'dvdrip', r'predvd', r'pre-dvd', r'camrip', r'hdcam', r'hdts', r'telecine', r'ts', r'tc', r'hdtvrip', r'hdtv',
-        r'hq', r'lq', r'clean', r'repack', r'proper', r'v2', r'v3', r'v4', r'uncut', r'unrated', r'extended', r'remastered', r'imax', r'hdr10plus', r'hdr10\+', r'hdr10', r'hdr', r'sdr', r'10bit', r'8bit',
-        r'2160p', r'1080p', r'720p', r'480p', r'360p', r'240p', r'4k', r'uhd', r'fhd', r'hd', r'sd',
-        r'x264', r'x265', r'hevc', r'h264', r'h265', r'avc', r'av1', r'xvid', r'divx'
-    ]) + r')\b'
-
-    s = re.sub(master_noise_pattern, ' ', s)
-    s = re.sub(r'(?i)\b\d+(\.\d+)?\s*(gb|mb|g|m)\b', ' ', s)
-    s = re.sub(r'[@_.\-+#\[\]\(\)]', ' ', s)
-
-    # Filter short noise tokens
-    valid_short_words = {'it', 'up', 'ai', 'go', 'me', 'we', 'no', 'my', 'be', 'do', 'if', 'in', 'is', 'of', 'on', 'or', 'to', 'us', 'vs', 'ii', 'iii', 'iv', 'v'}
-    words = [w for w in s.split() if w.strip()]
-    clean_words = []
-    for w in words:
-        wl = w.lower()
-        if len(w) <= 2 and wl not in valid_short_words and not w.isdigit():
-            continue
-        if wl in {'esub', 'msub', 'brrip', 'bdrip', 'webdl', 'webrip', 'predvd', 'hdrip', 'dvdrip', 'x264', 'x265', 'hevc', 'aac', 'clean', 'hq', 'esu', 'br', 'bd', 'l', 'web', 'untouched'}:
-            continue
-        clean_words.append(w)
-
-    clean_title = ' '.join(clean_words).strip()
-    clean_title = clean_title.title() if clean_words else stem.title()
-
-    if is_episode:
-        clean_title_with_year = clean_title
-    elif year:
-        clean_title_with_year = f"{clean_title} ({year})"
-    else:
-        clean_title_with_year = clean_title
-
-    # Generate master slug key (lowercase alphanumeric only, zero punctuation)
-    slug_base = re.sub(r'[^a-z0-9]', '', clean_title.lower())
-    if year:
-        slug = f"{slug_base}-{year}"
-    else:
-        slug = slug_base
-
-    quality = extracted_meta["quality"]
-    sanitized_filename = f"{slug}_{quality}.mp4"
-
-    return clean_title_with_year, sanitized_filename, slug, quality, extracted_meta
 
 
 def obfuscate_header(data_buffer: bytearray):

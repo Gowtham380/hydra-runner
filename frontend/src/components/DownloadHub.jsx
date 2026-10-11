@@ -59,7 +59,7 @@ export default function DownloadHub({ isOpen: externalIsOpen, setIsOpen: setExte
 
   const handleSaveToDevice = async (rec) => {
     triggerHaptic('notification', 'success');
-    await assembleAndTriggerSave(rec.id, rec.fileName, rec.movie?.mime_type || 'video/mp4');
+    await assembleAndTriggerSave(rec.id, rec.fileName, rec.movie?.mime_type || 'video/mp4', rec);
   };
 
   const handleWatchPreview = async (rec) => {

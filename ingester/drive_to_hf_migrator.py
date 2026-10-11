@@ -35,66 +35,21 @@ HEADER_MASK_LIMIT = 1024
 MAX_REPO_CHUNKS = 100  # Auto-rotate repo every 100 chunks (~10GB)
 
 
+try:
+    from ingester.title_sanitizer import sanitize_movie_title as engine_sanitize_movie_title, parse_video_line
+except ImportError:
+    from title_sanitizer import sanitize_movie_title as engine_sanitize_movie_title, parse_video_line
+
+
 def sanitize_movie_title(raw_filename: str) -> tuple[str, str, str, str]:
     """
-    SMD PRIME Regex Title Sanitization & Deduplication Normalizer
-    Strips website tags (@MoviezTamizha, www.1TamilMV.cz, Copy of), quality details, release year.
+    SMD PRIME Upgraded Title Sanitization & Deduplication Normalizer
+    Delegates to central high-precision title_sanitizer engine.
     Returns: (clean_title, sanitized_filename, slug, quality)
     """
-    name = Path(raw_filename).stem
-    ext = Path(raw_filename).suffix.lower()
-
-    # Strip Google Drive 'Copy of', 'Copy (1) of'
-    name = re.sub(r'^Copy\s*(\(\d+\))?\s*of\s+', '', name, flags=re.IGNORECASE)
-
-    # Strip website tags, pirate groups, telegram handles using multi-pass loop
-    prefix_patterns = [
-        r'^(?:https?://)?(?:www\.)?[\w\.-]+\.(?:com|org|net|cz|in|me|cc|info|tv|xyz|vip|mobi|app|link|site|work|top|club|fun|online|store|tech|pro)\b[-_ ]*',
-        r'^(?:www|ww1|ww2|ww3)\.[\w\.-]+\b[-_ ]*',
-        r'^(?:Movieztamizha|moviez[ _-]*tamizha)\b[-_ ]*',
-        r'^(?:Sam[ _-]*Dub[ _-]*Lezha|samdublezha|lezha)\b[-_ ]*',
-        r'^(?:Omgxmovies|omg[ _-]*x[ _-]*movies)\b[-_ ]*',
-        r'^(?:Tamilmv|tamilblasters|tamilrockers|tamilyogi|isaimini|kuttymovies|moviesda|cinemavilla|bolly4u|worldfree4u|9xmovies|katmoviehd|filmyzilla|desiremovies|mkvcinemas|hdhub4u)\b[-_ ]*',
-        r'^(?:crazymoviescmc|smd|gtm|tgstream|tglezha|blura)\b[-_ ]*',
-        r'^@[\w_]+\b[-_ ]*',
-        r'^\([\w\.-]+\.(?:com|cz|org|net|in|me)\)[-_ ]*',
-        r'^\[[\w\.-]+\.(?:com|cz|org|net|in|me)\][-_ ]*',
-    ]
-    for _ in range(5):
-        prev = name
-        for pattern in prefix_patterns:
-            name = re.sub(pattern, '', name, flags=re.IGNORECASE).strip()
-        name = re.sub(r'^[-\.\_\s:=|]+', '', name).strip()
-        if name == prev:
-            break
-
-    name = re.sub(r'\[.*?\]', '', name)
-
-    # Extract 4-Digit Release Year
-    year_match = re.search(r'\(?(\d{4})\)?', name)
-    year = year_match.group(1) if year_match else ""
-
-    # Quality Detection
-    quality = "1080p"
-    if "2160p" in name.lower() or "4k" in name.lower():
-        quality = "2160p"
-    elif "720p" in name.lower():
-        quality = "720p"
-    elif "480p" in name.lower():
-        quality = "480p"
-
-    # Core Title Isolation
-    core_title = re.split(r'hq|hdrip|web-dl|bluray|x264|x265|hevc|dd\+|aac|esub|720p|1080p|2160p|480p', name, flags=re.IGNORECASE)[0]
-    core_title = core_title.replace('.', ' ').replace('_', ' ').strip('- ').strip()
-
-    clean_title = f"{core_title} ({year})" if (year and year not in core_title) else core_title
-    
-    # Generate canonical slug for deduplication
-    slug_base = re.sub(r'[^\w\s-]', '', clean_title.lower())
-    slug = re.sub(r'[\s_-]+', '-', slug_base).strip('-')
-    sanitized_filename = f"{slug.replace('-', '.')}.{quality}{ext}"
-
+    clean_title, sanitized_filename, slug, quality, _ = engine_sanitize_movie_title(raw_filename)
     return clean_title, sanitized_filename, slug, quality
+
 
 
 import urllib.parse
@@ -553,7 +508,12 @@ def process_batch_ingestion(source_input: str, base_repo_id: str, hf_token: str,
 
     for idx, item in enumerate(video_items, 1):
         raw_filename = item["name"]
-        clean_title, sanitized_filename, slug, quality, *_ = sanitize_movie_title(raw_filename)
+        parsed = parse_video_line(raw_filename)
+        if not parsed:
+            print(f"\n[{idx}/{len(video_items)}] ⏭️ Discarding non-media/unsupported: '{raw_filename}'")
+            continue
+
+        clean_title, sanitized_filename, slug, quality = sanitize_movie_title(raw_filename)
 
         print(f"\n[{idx}/{len(video_items)}] Processing: {clean_title}")
         print(f"  ├─ Original File: {raw_filename}")

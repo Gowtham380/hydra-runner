@@ -6,12 +6,13 @@
 SERVICE_ACCOUNTS_JSON.txt
 keys/
 .wrangler/
+# Local data dumps & audit outputs
 output.txt
-.vite/
-
-
-
-
+gdrive_all_video_names.txt
+pipeline_extraction_audit.txt
+*.txt
+!requirements.txt
+!ingester/requirements.txt
 # Dependencies
 node_modules/
 frontend/node_modules/
@@ -20,6 +21,8 @@ frontend/node_modules/
 dist/
 build/
 frontend/dist/
+.vite/
+**/.vite/
 
 # Python cache & temporary files
 __pycache__/
