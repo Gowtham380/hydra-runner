@@ -323,14 +323,12 @@ def ingest_movie(
             "mime_type": mime_type,
             "file_size_bytes": file_size_bytes,
             "hf_raw_url": chunk_urls[0],  # Primary chunk fallback
-            "chunk_urls": chunk_urls,
             "poster_url": tmdb_meta.get("poster_url"),
             "backdrop_url": tmdb_meta.get("backdrop_url"),
             "description": tmdb_meta.get("description"),
             "rating": tmdb_meta.get("rating"),
             "release_year": tmdb_meta.get("release_year"),
-            "obfuscated": True,
-            "chunk_size_mb": chunk_size // (1024 * 1024)
+            "obfuscated": True
         }
 
         try:
