@@ -777,7 +777,6 @@ def register_in_supabase(
         "mime_type": "video/x-matroska",
         "file_size_bytes": safe_file_size,
         "hf_raw_url": hf_raw_url,
-        "chunk_urls": chunk_urls or [hf_raw_url],
         "poster_url": tmdb_meta.get("poster_url"),
         "backdrop_url": tmdb_meta.get("backdrop_url"),
         "description": tmdb_meta.get("description"),
@@ -786,8 +785,7 @@ def register_in_supabase(
         "duration": tmdb_meta.get("duration", "2h 15m"),
         "default_quality_label": quality_label,
         "is_theater_print": is_theater_print,
-        "obfuscated": True,
-        "chunk_size_mb": 100
+        "obfuscated": True
     }
 
     movie_endpoint = f"{supabase_url.rstrip('/')}/rest/v1/movies?on_conflict=slug"
@@ -839,10 +837,8 @@ def register_in_supabase(
         "mime_type": "video/x-matroska",
         "file_size_bytes": safe_file_size,
         "hf_raw_url": hf_raw_url,
-        "chunk_urls": chunk_urls or [hf_raw_url],
         "is_theater_print": is_theater_print,
-        "obfuscated": True,
-        "chunk_size_mb": 100
+        "obfuscated": True
     }
 
     get_file_res = requests.get(
