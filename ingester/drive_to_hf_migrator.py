@@ -635,14 +635,12 @@ def process_batch_ingestion(source_input: str, base_repo_id: str, hf_token: str,
                 "mime_type": mime_type,
                 "file_size_bytes": file_size_bytes,
                 "hf_raw_url": chunk_urls[0],
-                "chunk_urls": chunk_urls,
                 "poster_url": tmdb_meta.get("poster_url"),
                 "backdrop_url": tmdb_meta.get("backdrop_url"),
                 "description": tmdb_meta.get("description"),
                 "rating": tmdb_meta.get("rating"),
                 "release_year": tmdb_meta.get("release_year"),
-                "obfuscated": True,
-                "chunk_size_mb": 100
+                "obfuscated": True
             }
 
             try:
