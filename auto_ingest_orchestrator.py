@@ -236,15 +236,13 @@ def run_tri_mesh_orchestrator():
                 "mime_type": "video/x-matroska",
                 "file_size_bytes": safe_size,
                 "hf_raw_url": hf_raw_url,
-                "chunk_urls": chunk_urls,
                 "poster_url": tmdb_meta.get("poster_url"),
                 "backdrop_url": tmdb_meta.get("backdrop_url"),
                 "description": tmdb_meta.get("description"),
                 "rating": tmdb_meta.get("rating", 8.9),
                 "release_year": tmdb_meta.get("release_year", 2026),
                 "duration": tmdb_meta.get("duration", "2h 15m"),
-                "obfuscated": True,
-                "chunk_size_mb": 100
+                "obfuscated": True
             }
 
             res_m = requests.post(f"{supabase_url.rstrip('/')}/rest/v1/movies?on_conflict=slug", headers=headers_post, json=movie_payload, timeout=10)
@@ -266,9 +264,7 @@ def run_tri_mesh_orchestrator():
                     "mime_type": "video/x-matroska",
                     "file_size_bytes": safe_size,
                     "hf_raw_url": hf_raw_url,
-                    "chunk_urls": chunk_urls,
-                    "obfuscated": True,
-                    "chunk_size_mb": 100
+                    "obfuscated": True
                 }
                 res_f = requests.post(f"{supabase_url.rstrip('/')}/rest/v1/movie_files", headers=headers_post, json=file_payload, timeout=10)
                 if res_f.ok:
