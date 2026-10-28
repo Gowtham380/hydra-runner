@@ -16,6 +16,28 @@ jobs:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 
+      - name: 🧹 Free Up 65GB+ NVMe Disk Space (Strip OS Bloatware)
+        run: |
+          echo "=== DISK BEFORE CLEANUP ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune -a --force || true
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile || true
+          echo "=== DISK AFTER CLEANUP (65GB+ FREE NVMe) ==="
+          df -h /
+
+      - name: 🔄 Dynamic Engine Sync (Single Source of Truth from SMD-PRIME)
+        run: |
+          if [ -n "${{ secrets.GH_PAT }}" ]; then
+            echo "🚀 Fetching latest SMD-PRIME master engine via GH_PAT..."
+            git clone --depth 1 https://${{ secrets.GH_PAT }}@github.com/Gowtham380/SMD-PRIME.git engine
+            echo "ENGINE_DIR=engine" >> $GITHUB_ENV
+          else
+            echo "ℹ️ GH_PAT not provided. Running local fallback scripts in hydra-runner..."
+            echo "ENGINE_DIR=." >> $GITHUB_ENV
+          fi
+
       - name: 🐍 Set up Python 3.10
         uses: actions/setup-python@v5
         with:
@@ -38,4 +60,5 @@ jobs:
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           SERVICE_ACCOUNTS_JSON: ${{ secrets.SERVICE_ACCOUNTS_JSON }}
         run: |
-          python ingester/modal_drive_migrator.py
+          python $ENGINE_DIR/ingester/modal_drive_migrator.py
+
