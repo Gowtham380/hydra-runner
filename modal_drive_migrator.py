@@ -6,7 +6,7 @@ PROJECT HYDRA / SMD PRIME - MODAL CLOUD WORKER INGESTION ENGINE (STRATEGY B)
 Architecture:
 1. Serverless 24/7 Autonomous Background Execution via Modal.
 2. 3-Dataset Mesh Sharding (`hydra-movies-1`, `hydra-movies-2`, `hydra-movies-3`).
-3. Single-Commit Multi-Chunk Batching (`create_commit`) -> 1 Movie = 1 Commit.
+3. Zero-Chunk 1:1 Native Stream Mesh -> 1 Movie File = 1 Atomic Git LFS Asset.
 4. Multi-Quality DSA Mapping & Supabase `movie_sources` Registration.
 5. Zero-RAM Disk Offset Streaming (Seek offset) - Maximum 800MB RAM footprint.
 6. Service Account Mesh Auto-Rotation (16+ SAs).
@@ -15,6 +15,13 @@ Architecture:
 
 import os
 import sys
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 import time
 import math
 import json
@@ -43,24 +50,9 @@ except ImportError:
     print("❌ Missing required packages! Run: pip install huggingface_hub requests python-dotenv cryptography modal")
     sys.exit(1)
 
-DEFAULT_CHUNK_SIZE = 100 * 1024 * 1024  # 100MB Default Chunk
 HEADER_MASK_LIMIT = 1024
 XOR_KEY = 0x5F
-MAX_PARALLEL_WORKERS = 8  # 8 Parallel Threads per Movie Batch Upload
-
-def get_adaptive_chunk_size(file_size_bytes: int) -> int:
-    """
-    Adaptive Dynamic Chunk Sizing Engine:
-    - 4K / Large Movies (>= 8 GB): 250 MB chunks (60% less HTTP overhead & Git LFS latency)
-    - 1080p High Bitrate (>= 3 GB): 150 MB chunks
-    - Standard / Episodes (< 3 GB): 100 MB chunks
-    """
-    if not file_size_bytes or file_size_bytes < 3 * 1024 * 1024 * 1024:
-        return 100 * 1024 * 1024
-    elif file_size_bytes < 8 * 1024 * 1024 * 1024:
-        return 150 * 1024 * 1024
-    else:
-        return 250 * 1024 * 1024
+MAX_PARALLEL_WORKERS = 8  # 8 Parallel Threads per Movie Upload
 
 # 10-Dataset Mesh Repositories for High-Throughput Ingestion
 MESH_REPOSITORIES = [
@@ -165,27 +157,47 @@ def extract_file_metadata(raw_filename: str, file_size_bytes: int = 0) -> dict:
     elif re.search(r'\b(hdtv|hdtvrip)\b', text):
         rip_type = "HDTV"
 
-    # 2. Quality Resolution (Always store resolution code e.g. 720p/1080p/4K/480p)
+    # 2. Quality Resolution (Explicit match only for theater prints)
+    explicit_res = None
     if re.search(r'\b(2160p|4k|uhd)\b', text):
-        quality = "2160p"
+        explicit_res = "2160p"
     elif re.search(r'\b(1080p|fhd)\b', text):
-        quality = "1080p"
-    elif re.search(r'\b(720p|hd)\b', text):
-        quality = "720p"
+        explicit_res = "1080p"
+    elif re.search(r'\b(720p)\b', text):
+        explicit_res = "720p"
     elif re.search(r'\b(480p|sd|360p|240p)\b', text):
-        quality = "480p"
+        explicit_res = "480p"
+
+    # 3. Formatted UI Quality Label & Quality Code
+    if is_theater_print or rip_type in ("PreDVD", "CAM/TS"):
+        if explicit_res:
+            quality = explicit_res
+            quality_label = f"PRE-DVD {quality.upper()} HQ"
+        else:
+            quality = "PreDVD"
+            quality_label = "PRE-DVD THEATER"
     else:
-        # Fallback estimation via file_size_bytes if available
-        if file_size_bytes > 1_500_000_000:
+        if explicit_res:
+            quality = explicit_res
+        elif file_size_bytes > 1_500_000_000:
             quality = "1080p"
         elif file_size_bytes > 700_000_000:
             quality = "720p"
         elif file_size_bytes > 0:
             quality = "480p"
         else:
-            quality = "720p"
+            quality = "1080p"
 
-    # 3. Codec Detection
+        if quality == "2160p":
+            quality_label = f"4K ULTRA HD ({rip_type})"
+        elif quality == "1080p":
+            quality_label = f"1080P FULL HD ({rip_type})"
+        elif quality == "720p":
+            quality_label = f"720P HD ({rip_type})"
+        else:
+            quality_label = f"480P SD ({rip_type})"
+
+    # 4. Codec Detection
     codec = "x264"
     if re.search(r'\b(x265|hevc|h\.?265)\b', text):
         codec = "HEVC/x265"
@@ -194,27 +206,16 @@ def extract_file_metadata(raw_filename: str, file_size_bytes: int = 0) -> dict:
     elif re.search(r'\bav1\b', text):
         codec = "AV1"
 
-    # 4. Audio Language Track Extraction
+    # 5. Audio Language Track Extraction (Strip pirate domains first)
+    clean_audio_text = clean_movie_title(raw_filename).lower()
     langs = []
-    if re.search(r'\b(tam|tamil)\b', text): langs.append("Tamil")
-    if re.search(r'\b(tel|telugu)\b', text): langs.append("Telugu")
-    if re.search(r'\b(hin|hindi)\b', text): langs.append("Hindi")
-    if re.search(r'\b(mal|malayalam)\b', text): langs.append("Malayalam")
-    if re.search(r'\b(kan|kannada)\b', text): langs.append("Kannada")
-    if re.search(r'\b(eng|english)\b', text): langs.append("English")
+    if re.search(r'\b(tam|tamil)\b', clean_audio_text): langs.append("Tamil")
+    if re.search(r'\b(tel|telugu)\b', clean_audio_text): langs.append("Telugu")
+    if re.search(r'\b(hin|hindi)\b', clean_audio_text): langs.append("Hindi")
+    if re.search(r'\b(mal|malayalam)\b', clean_audio_text) and not re.search(r'\bmalai\b', clean_audio_text): langs.append("Malayalam")
+    if re.search(r'\b(kan|kannada)\b', clean_audio_text): langs.append("Kannada")
+    if re.search(r'\b(eng|english)\b', clean_audio_text): langs.append("English")
     if not langs: langs = ["Tamil"]
-
-    # 5. Formatted UI Quality Label
-    if is_theater_print or rip_type in ("PreDVD", "CAM/TS"):
-        quality_label = f"PRE-DVD {quality.upper()} HQ"
-    elif quality == "2160p":
-        quality_label = f"4K ULTRA HD ({rip_type})"
-    elif quality == "1080p":
-        quality_label = f"1080P FULL HD ({rip_type})"
-    elif quality == "720p":
-        quality_label = f"720P HD ({rip_type})"
-    else:
-        quality_label = f"480P SD ({rip_type})"
 
     return {
         "quality": quality,
@@ -286,152 +287,114 @@ class MeshRepoRouter:
 
 
 # ================================================================================
-# SMART DELTA RESUME & HF MISSING CHUNK VERIFIER (DSA BITSET SET-DIFFERENCE)
+# 1-FILE NATIVE STREAM STORAGE & HF FILE VERIFIER
 # ================================================================================
-def get_existing_repo_chunks(api: HfApi, repo_id: str, slug: str, quality: str) -> set[int]:
-    """
-    Queries Hugging Face repository files to verify already uploaded chunks.
-    Verifies chunk existence and size (>0 bytes) to prevent corrupted file skips.
-    Returns a set of part indices (1-indexed) already stored in HF.
-    """
-    existing_parts = set()
-    prefix = f"{slug}/{quality}/"
-    try:
-        # Attempt detailed tree inspection first
-        tree_items = api.list_repo_tree(repo_id=repo_id, path_in_repo=f"{slug}/{quality}", repo_type="dataset")
-        for item in tree_items:
-            path_str = getattr(item, 'path', '') or str(item)
-            size_val = getattr(item, 'size', 1)
-            if path_str.endswith(".bin") and size_val > 0:
-                part_match = re.search(r'_part(\d+)\.bin$', path_str)
-                if part_match:
-                    existing_parts.add(int(part_match.group(1)))
-    except Exception:
-        # Fallback to list_repo_files if directory doesn't exist yet or tree fails
+
+
+def check_single_file_exists(api: HfApi, repo_id: str, slug: str, quality: str, canonical_name: str = None) -> bool:
+    """Checks if 1:1 single-file mesh exists on Hugging Face (supports both canonical scene name and legacy slug name)"""
+    candidate_paths = []
+    if canonical_name:
+        candidate_paths.append(f"{slug}/{quality}/{canonical_name}.bin")
+    candidate_paths.append(f"{slug}/{quality}/{slug}_{quality}.bin")
+    for path_in_repo in candidate_paths:
         try:
-            files = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
-            for f in files:
-                if f.startswith(prefix) and f.endswith(".bin"):
-                    part_match = re.search(r'_part(\d+)\.bin$', f)
-                    if part_match:
-                        existing_parts.add(int(part_match.group(1)))
-        except Exception as e:
-            print(f"  ⚠️ Couldn't check existing HF files for {slug} in {repo_id}: {e}")
-            
-    return existing_parts
+            if api.file_exists(repo_id=repo_id, filename=path_in_repo, repo_type="dataset"):
+                return True
+        except Exception:
+            pass
+    return False
 
 
 # ================================================================================
-# SLIDING-WINDOW MULTI-COMMIT BATCH UPLOADER (DSA FAIL-SAFE DELTA RESUME)
+# PROJECT HYDRA 2.0 - 1:1 SINGLE-FILE MESH UPLOADER (ZERO CHUNKS)
 # ================================================================================
-def upload_movie_batch_commit(
+def upload_movie_single_file(
     file_path: Path,
     slug: str,
     clean_title: str,
     quality: str,
     router: MeshRepoRouter,
-    max_chunks_per_commit: int = 8
-) -> tuple[list[str], str]:
+    canonical_name: str = None
+) -> tuple[list[str], str, float, float]:
     """
-    Uploads missing chunks of a movie using DSA Bitset Set-Difference & Multi-Thread Concurrent Commit Upload Mesh.
-    - Adaptive Dynamic Chunk Sizing (100MB / 150MB / 250MB based on file size).
-    - Multi-Threaded Parallel Upload Mesh (4 Concurrent Windows) for 350+ MB/s upload speed.
+    PROJECT HYDRA 2.0 - 1:1 SINGLE-FILE MESH UPLOADER (ZERO CHUNKS)
+    Uploads the complete movie file as a single Git LFS binary tensor file (.bin)
+    to Hugging Face dataset mesh without 100MB chunk fragmentation.
+    Returns: ([single_raw_url], target_repo, real_upload_speed_mbps, upload_duration_sec)
     """
     target_repo = router.get_target_repo(slug, quality)
     file_size = file_path.stat().st_size
-    chunk_size = get_adaptive_chunk_size(file_size)
-    chunk_size_mb = int(chunk_size / (1024 * 1024))
-    total_parts = math.ceil(file_size / chunk_size)
+    file_size_gb = file_size / (1024 ** 3)
     
-    print(f"\n🚀 [DSA BITSET RESUME] Checking {clean_title} [{quality}] ({file_size/(1024**3):.2f} GB | Adaptive Chunk Size: {chunk_size_mb} MB)")
+    single_filename = f"{canonical_name}.bin" if canonical_name else f"{slug}_{quality}.bin"
+    path_in_repo = f"{slug}/{quality}/{single_filename}"
+    quoted_path = requests.utils.quote(path_in_repo)
+    single_raw_url = f"https://huggingface.co/datasets/{target_repo}/resolve/main/{quoted_path}"
+
+    print(f"\n🚀 [1:1 SINGLE-FILE MESH] Initiating {clean_title} [{quality}] ({file_size_gb:.2f} GB)")
     print(f"  ├─ Target Repo Mesh: {target_repo}")
-    print(f"  ├─ Total Chunks Required: {total_parts} x {chunk_size_mb}MB Chunks")
+    print(f"  ├─ Remote Storage Path: {path_in_repo}")
 
-    # 1. DSA Bitset Set Difference: U \ S_verified
-    existing_parts = get_existing_repo_chunks(router.api, target_repo, slug, quality)
-    missing_parts = [i for i in range(1, total_parts + 1) if i not in existing_parts]
-    
-    print(f"  ├─ Verified on HF: {len(existing_parts)} / {total_parts} chunks present")
-    print(f"  └─ Missing Delta: {len(missing_parts)} chunks to upload")
+    # Check if single file already exists on HF
+    try:
+        if router.api.file_exists(repo_id=target_repo, filename=path_in_repo, repo_type="dataset"):
+            print(f"  ✅ [PRE-CHECK COMPLETE] {clean_title} [{quality}] single file already exists on HF! Skipping upload.")
+            return [single_raw_url], target_repo, 0.0, 0.0
+    except Exception:
+        pass
 
-    all_chunk_urls = [
-        f"https://huggingface.co/datasets/{target_repo}/resolve/main/{slug}/{quality}/{slug}_{quality}_part{p:03d}.bin"
-        for p in range(1, total_parts + 1)
-    ]
+    # Obfuscate header (first 1024 bytes) in-place for PyTorch / AI Model Masquerade
+    try:
+        with open(file_path, "r+b") as f:
+            header = bytearray(f.read(HEADER_MASK_LIMIT))
+            if header:
+                obfuscate_header(header)
+                f.seek(0)
+                f.write(header)
+    except Exception as obf_err:
+        print(f"  ⚠️ Warning applying header obfuscation: {obf_err}")
 
-    if not missing_parts:
-        print(f"  ✅ [100% COMPLETE] {clean_title} [{quality}] all chunks verified on HF! Skipping upload.")
-        return all_chunk_urls, target_repo
+    print(f"  📦 Uploading 1:1 single file ({file_size_gb:.2f} GB) to [{target_repo}] via HF Git LFS...", flush=True)
+    upload_start = time.time()
+    upload_speed = 0.0
+    upload_duration = 0.0
 
-    # 2. Sliding Window Chunking: Divide missing_parts into windows of size max_chunks_per_commit
-    chunk_windows = [missing_parts[i:i + max_chunks_per_commit] for i in range(0, len(missing_parts), max_chunks_per_commit)]
-    total_windows = len(chunk_windows)
-    
-    print(f"  📦 Pushing {len(missing_parts)} missing chunks across {total_windows} windowed commit(s) via 4-Thread HF Parallel Upload Mesh...", flush=True)
-
-    def push_window_task(item):
-        w_idx, window = item
-        repo_to_use = target_repo
-        operations = []
-        for part_idx in window:
-            offset = (part_idx - 1) * chunk_size
-            with open(file_path, 'rb') as f:
-                f.seek(offset)
-                raw_data = f.read(chunk_size)
-
-            chunk_bytes = bytearray(raw_data)
-            obfuscate_header(chunk_bytes)
-            chunk_filename = f"{slug}_{quality}_part{part_idx:03d}.bin"
-            path_in_repo = f"{slug}/{quality}/{chunk_filename}"
-
-            operations.append(
-                CommitOperationAdd(
-                    path_in_repo=path_in_repo,
-                    path_or_fileobj=bytes(chunk_bytes)
-                )
+    for attempt in range(1, 5):
+        try:
+            router.api.upload_file(
+                path_or_fileobj=str(file_path),
+                path_in_repo=path_in_repo,
+                repo_id=target_repo,
+                repo_type="dataset",
+                commit_message=f"Ingest {clean_title} [{quality}] (Single-File Mesh 1:1)"
             )
+            upload_duration = max(time.time() - upload_start, 0.001)
+            upload_speed = (file_size / (1024 * 1024)) / upload_duration
+            print(f"  ✅ [1:1 UPLOAD SUCCESS] {file_size_gb:.2f} GB transferred in {upload_duration:.1f}s | ⚡ Speed: {upload_speed:.1f} MB/s", flush=True)
+            break
+        except Exception as err:
+            err_str = str(err)
+            if "429" in err_str or "rate limit" in err_str.lower():
+                print(f"  ⚠️ [HTTP 429 RATE LIMIT] Repo [{target_repo}] hit limit! Switching repo shard...", flush=True)
+                curr_idx = router.repos.index(target_repo) if target_repo in router.repos else 0
+                next_idx = (curr_idx + 1) % len(router.repos)
+                target_repo = router.repos[next_idx]
+                single_raw_url = f"https://huggingface.co/datasets/{target_repo}/resolve/main/{slug}/{quality}/{single_filename}"
+                try:
+                    router.api.create_repo(repo_id=target_repo, repo_type="dataset", private=False, exist_ok=True)
+                except Exception:
+                    pass
+                time.sleep(2)
+                continue
 
-        print(f"  ⚡ [Parallel Window {w_idx}/{total_windows}] Pushing Commit ({len(window)} chunks: {window[0]}..{window[-1]}) to [{repo_to_use}]...", flush=True)
-        commit_start = time.time()
-        
-        for attempt in range(1, 5):
-            try:
-                router.api.create_commit(
-                    repo_id=repo_to_use,
-                    repo_type="dataset",
-                    operations=operations,
-                    commit_message=f"Ingest {clean_title} [{quality}] Window {w_idx}/{total_windows} (Parts {window[0]}..{window[-1]})"
-                )
-                commit_duration = time.time() - commit_start
-                delta_bytes = len(window) * chunk_size
-                upload_speed = (delta_bytes / (1024 * 1024)) / max(commit_duration, 0.001)
-                print(f"  ✅ [Window {w_idx}/{total_windows} SUCCESS] ({len(window)} chunks, {delta_bytes/(1024*1024):.1f} MB in {commit_duration:.1f}s | ⚡ Parallel Speed: {upload_speed:.1f} MB/s)", flush=True)
-                break
-            except Exception as err:
-                err_str = str(err)
-                if "429" in err_str or "rate limit" in err_str.lower():
-                    print(f"  ⚠️ [HTTP 429 RATE LIMIT] Repo [{repo_to_use}] hit limit! Switching repo shard...", flush=True)
-                    curr_idx = router.repos.index(repo_to_use) if repo_to_use in router.repos else 0
-                    next_idx = (curr_idx + 1) % len(router.repos)
-                    repo_to_use = router.repos[next_idx]
-                    try:
-                        router.api.create_repo(repo_id=repo_to_use, repo_type="dataset", private=False, exist_ok=True)
-                    except Exception:
-                        pass
-                    time.sleep(1)
-                    continue
+            print(f"  ⚠️ Single-File Upload Attempt {attempt} failed: {err}", flush=True)
+            if attempt == 4:
+                raise err
+    return single_raw_url, target_repo, upload_speed, upload_duration
 
-                print(f"  ⚠️ Window {w_idx} Commit Attempt {attempt} failed: {err}", flush=True)
-                if attempt == 4:
-                    raise err
-                time.sleep(attempt * 2)
 
-    with ThreadPoolExecutor(max_workers=min(4, total_windows)) as executor:
-        futures = [executor.submit(push_window_task, (w_idx, window)) for w_idx, window in enumerate(chunk_windows, start=1)]
-        for future in as_completed(futures):
-            future.result()
 
-    return all_chunk_urls, target_repo
 
 
 # ================================================================================
@@ -622,12 +585,16 @@ def render_command_center_hud(
     total_gb: float,
     start_time: float,
     active_sa_email: str,
+    sa_quota_left_pct: float,
+    sa_quota_left_gb: float,
     sa_total_count: int,
     tmdb_meta: dict,
     repo_distribution: dict,
     current_item: dict,
     healing_stats: dict,
     queue_items: list,
+    shard_index: int = 1,
+    total_shards: int = 1,
     folder_stats: dict = None
 ):
     elapsed_sec = int(time.time() - start_time)
@@ -644,7 +611,8 @@ def render_command_center_hud(
     
     rating = tmdb_meta.get("rating", 8.9)
     release_year = tmdb_meta.get("release_year", 2026)
-    tmdb_status_str = f"🟢 MATCHED (Rating: {rating}★ | Poster HD | Release: {release_year})" if tmdb_meta else "🟢 READY"
+    tmdb_title = tmdb_meta.get("title") or current_item.get("clean_title", "Matched")
+    tmdb_status_str = f"🟢 MATCHED ({tmdb_title} • {rating}★ • {release_year})" if tmdb_meta else "🟢 READY"
 
     def make_bar(pct, length=20):
         filled = int(length * pct // 100)
@@ -656,21 +624,22 @@ def render_command_center_hud(
     
     dl_pct = current_item.get("dl_pct", 100.0)
     dl_mb = current_item.get("dl_mb", size_mb)
-    dl_speed = current_item.get("dl_speed", 195.4)
-    dl_time = current_item.get("dl_time", 5.3)
+    dl_speed = current_item.get("dl_speed", 0.0)
+    dl_time = current_item.get("dl_time", 0.0)
 
-    hf_chunks = current_item.get("hf_chunks", 8)
-    hf_total_chunks = current_item.get("hf_total_chunks", 8)
-    hf_repo = current_item.get("hf_repo", "hydra-movies-3").split("/")[-1]
-    hf_speed = current_item.get("hf_speed", 355)
+    hf_repo = current_item.get("hf_repo", "hydra-movies-1").split("/")[-1]
+    hf_speed = current_item.get("hf_speed", 0.0)
+    hf_time = current_item.get("hf_time", 0.0)
 
-    master_id = current_item.get("master_id", 49)
-    db_time = current_item.get("db_time", 0.18)
+    master_id = current_item.get("master_id", "Synced")
+    db_time_ms = current_item.get("db_time_ms", 0.0)
 
     auto_heals = healing_stats.get("auto_heals", 0)
     dupes = healing_stats.get("duplicates", 0)
     sa_rotations = healing_stats.get("sa_rotations", 0)
     errors = healing_stats.get("errors", 0)
+    peak_dl = healing_stats.get("peak_dl_speed", 0.0)
+    peak_up = healing_stats.get("peak_up_speed", 0.0)
 
     queue_strs = []
     for idx, q_item in enumerate(queue_items[:3], start=1):
@@ -678,49 +647,58 @@ def render_command_center_hud(
         clean_q_name, _, _, q_qual, _ = sanitize_movie_title(q_name)
         q_mb = int(int(q_item.get("size", 0)) / (1024*1024))
         queue_strs.append(f"{idx}. {clean_q_name} [{q_qual}] ({q_mb}MB)")
-    queue_formatted = " | ".join(queue_strs) if queue_strs else "1. Next in Queue (Processing)"
+    queue_formatted = " | ".join(queue_strs) if queue_strs else "Queue Complete"
 
-    print("=" * 100, flush=True)
-    print("🐉 PROJECT HYDRA - ULTIMATE TRI-MESH INGESTION & HEALING COMMAND CENTER", flush=True)
-    print("=" * 100, flush=True)
-    print(f" 📊 GLOBAL PARITY EQUATION : N_GDrive ({n_gdrive}) ≡ N_HF ({n_hf}) ≡ N_Supabase ({n_supabase}) | Overall Sync: {sync_pct:.1f}%", flush=True)
-    print(f" ⏱️ TIME & CAPACITY       : Ingested: {ingested_gb:.1f} GB / {total_gb:.1f} GB | Elapsed: {elapsed_str} | ETA: {eta_str}", flush=True)
-    print(f" ⚡ NETWORK & THREADS      : 8 Parallel Threads | Avg Speed: {avg_speed:.1f} MB/s | Peak Speed: 355.7 MB/s", flush=True)
-    print("=" * 100, flush=True)
-    print(f" 🔑 SERVICE ACCOUNT MESH   : Active: {sa_short} | SA Health: {sa_total_count}/{sa_total_count} 🟢 | Quota: 98% Left", flush=True)
-    print(f" 🎨 TMDB METADATA ENGINE   : Status: {tmdb_status_str}", flush=True)
+    w = 100
+    print("╔" + "═" * (w - 2) + "╗", flush=True)
+    shard_hdr = f" 🐉 PROJECT HYDRA — TRI-MESH COMMAND CENTER [SHARD {shard_index}/{total_shards}]"
+    print(f"║{shard_hdr:<{w-2}}║", flush=True)
+    print("╠" + "═" * (w - 2) + "╣", flush=True)
     
-    print(f" 📦 HF MESH REPO DISTRIBUTION ({len(repo_distribution)} REPOS LIVE):", flush=True)
+    line1 = f" 📊 GLOBAL PARITY : N_GDrive ({n_gdrive}) ≡ N_HF ({n_hf}) ≡ N_Supabase ({n_supabase}) | Sync: {sync_pct:.1f}%"
+    print(f"║{line1:<{w-2}}║", flush=True)
+    
+    line2 = f" ⏱️ TIME & LOAD   : Ingested: {ingested_gb:.1f} GB / {total_gb:.1f} GB | Elapsed: {elapsed_str} | ETA: {eta_str}"
+    print(f"║{line2:<{w-2}}║", flush=True)
+    
+    line3 = f" ⚡ REAL NETWORK  : Ingress Peak: {peak_dl:.1f} MB/s | Egress Peak: {peak_up:.1f} MB/s | Workers: 8 Threads"
+    print(f"║{line3:<{w-2}}║", flush=True)
+    
+    line4 = f" 🔑 SA MESH QUOTA : Active: {sa_short} | Health: {sa_total_count}/{sa_total_count} 🟢 | Left: {sa_quota_left_pct:.1f}% ({sa_quota_left_gb:.1f} GB)"
+    print(f"║{line4:<{w-2}}║", flush=True)
+    
+    line5 = f" 🎨 TMDB ENGINE   : {tmdb_status_str}"
+    print(f"║{line5:<{w-2}}║", flush=True)
+    print("╠" + "═" * (w - 2) + "╣", flush=True)
+    
+    print(f"║ 📦 HF REPO MESH DISTRIBUTION ({len(repo_distribution)} REPOS LIVE):" + " " * (w - 49) + "║", flush=True)
     total_repo_gb = sum(repo_distribution.values()) or 1.0
     sorted_repos = sorted(repo_distribution.items(), key=lambda x: x[0])
     for idx, (r_name, r_gb) in enumerate(sorted_repos, start=1):
         r_pct = min(100, int((r_gb / total_repo_gb) * 100)) if total_repo_gb > 0 else 0
         prefix = "├─" if idx < len(sorted_repos) else "└─"
-        print(f"    {prefix} Repo {idx:02d} ({r_name:<16}) : {r_gb:6.1f} GB [{make_bar(r_pct)}] {r_pct:3d}%", flush=True)
+        repo_line = f"    {prefix} Repo {idx:02d} ({r_name:<16}) : {r_gb:6.1f} GB [{make_bar(r_pct)}] {r_pct:3d}%"
+        print(f"║{repo_line:<{w-2}}║", flush=True)
+        
+    print("╠" + "═" * (w - 2) + "╣", flush=True)
+    act_hdr = f" 🎬 CURRENT ACTIVE ITEM: {title} [{quality}] ({size_mb:.0f} MB)"
+    print(f"║{act_hdr:<{w-2}}║", flush=True)
     
-    if folder_stats:
-        print("=" * 100, flush=True)
-        print(f" 📂 GDRIVE FOLDER SYNC MATRIX (LIVE PUSH STATUS):", flush=True)
-        sorted_folders = sorted(folder_stats.items(), key=lambda x: x[0])
-        for idx, (f_name, f_data) in enumerate(sorted_folders, start=1):
-            t_bytes = max(1, f_data.get("total_bytes", 1))
-            i_bytes = f_data.get("ingested_bytes", 0)
-            f_pct = min(100.0, (i_bytes / t_bytes) * 100)
-            f_ingested_gb = i_bytes / (1024**3)
-            f_total_gb = t_bytes / (1024**3)
-            status_icon = "🟢 DONE" if f_pct >= 99.9 else "⚡ IN-PROGRESS"
-            prefix = "├─" if idx < len(sorted_folders) else "└─"
-            print(f"    {prefix} 📁 {f_name[:25]:<25} : [{make_bar(int(f_pct))}] {f_pct:5.1f}% ({f_ingested_gb:.1f} GB / {f_total_gb:.1f} GB) {status_icon}", flush=True)
-
-    print("=" * 100, flush=True)
-    print(f" 🎬 CURRENT ACTIVE ITEM   : {title} [{quality}] ({size_mb:.1f} MB)", flush=True)
-    print(f" 📥 GDrive Byte-Stream     : [{make_bar(dl_pct)}] {dl_pct:.0f}% | {dl_mb:.0f} MB | ⚡ {dl_speed:.1f} MB/s ({dl_time:.1f}s)", flush=True)
-    print(f" 🚀 HF Chunk Ingestion     : [{make_bar(int((hf_chunks/max(1, hf_total_chunks))*100))}] {hf_chunks}/{hf_total_chunks} Chunks -> [{hf_repo}] ⚡ {hf_speed:.0f} MB/s", flush=True)
-    print(f" ⚡ Supabase DB Record     : 🟢 MASTER (ID: #{master_id}) | 🟢 QUALITY ({quality} Linked) | ⏱️ {db_time:.2f}s", flush=True)
-    print(f" 🔧 SELF-HEALING MATRIX    : Auto-Heals: {auto_heals} | Duplicates Filtered: {dupes} | SA Rotations: {sa_rotations} | Errors: {errors}", flush=True)
-    print("=" * 100, flush=True)
-    print(f" 🔮 UP NEXT IN QUEUE       : {queue_formatted}", flush=True)
-    print("=" * 100 + "\n", flush=True)
+    dl_line = f"    ├─ 📥 GDrive Stream : [{make_bar(int(dl_pct))}] {dl_pct:.0f}% | {dl_mb:.0f} MB | ⚡ {dl_speed:.1f} MB/s in {dl_time:.1f}s"
+    print(f"║{dl_line:<{w-2}}║", flush=True)
+    
+    hf_line = f"    ├─ 🚀 HF 1:1 Egress : [████████████████████] 100% -> [{hf_repo}] | ⚡ {hf_speed:.1f} MB/s in {hf_time:.1f}s"
+    print(f"║{hf_line:<{w-2}}║", flush=True)
+    
+    db_line = f"    └─ ⚡ Supabase DB   : 🟢 MASTER (ID: #{master_id}) | 🟢 QUALITY [{quality}] | ⏱️ {db_time_ms:.0f}ms Latency"
+    print(f"║{db_line:<{w-2}}║", flush=True)
+    
+    heal_line = f" 🔧 HEALING MATRIX : Auto-Heals: {auto_heals} | Dupes Filtered: {dupes} | SA Rotations: {sa_rotations} | Errors: {errors}"
+    print(f"║{heal_line:<{w-2}}║", flush=True)
+    
+    queue_line = f" 🔮 UP NEXT QUEUE  : {queue_formatted}"
+    print(f"║{queue_line:<{w-2}}║", flush=True)
+    print("╚" + "═" * (w - 2) + "╝\n", flush=True)
 
 
 # ================================================================================
@@ -732,20 +710,22 @@ def register_in_supabase(
     quality: str,
     file_name: str,
     file_size_bytes: int,
-    chunk_urls: list[str],
+    hf_raw_url: str,
     target_repo: str,
     tmdb_meta: dict,
     supabase_url: str,
     supabase_key: str,
     extracted_meta: dict = None
-):
+) -> tuple[any, float]:
     """
     Registers metadata in Supabase `movies` table & multi-quality sources in `movie_files`.
     Instant developer UX: updates both `movies` (master) and `movie_files` (quality variant).
+    Returns: (movie_id, db_latency_ms)
     """
+    t_db_start = time.time()
     if not supabase_url or not supabase_key:
         print("  ⚠️ Supabase credentials missing. Skipping DB registration.")
-        return
+        return None, 0.0
 
     # Fetch TMDB metadata if missing
     if not tmdb_meta or not tmdb_meta.get("poster_url"):
@@ -768,113 +748,218 @@ def register_in_supabase(
     }
 
     # Ensure safe non-empty hf_raw_url and valid file_size_bytes to satisfy PostgREST NOT-NULL schema constraints
-    hf_raw_url = chunk_urls[0] if (chunk_urls and len(chunk_urls) > 0) else f"https://huggingface.co/datasets/{target_repo}/resolve/main/{slug}/{quality}/{slug}_{quality}_part001.bin"
+    canonical_bin = (extracted_meta and extracted_meta.get("scene_bin_name")) or f"{slug}_{quality}.bin"
+    quoted_rel_path = requests.utils.quote(f"{slug}/{quality}/{canonical_bin}")
+
+    if not hf_raw_url:
+        hf_raw_url = f"https://huggingface.co/datasets/{target_repo}/resolve/main/{quoted_rel_path}"
     safe_file_size = max(1024, file_size_bytes) if file_size_bytes else 1024
 
-    # 1. Upsert Movie Master Record in `public.movies`
-    movie_payload = {
-        "title": clean_title,
-        "slug": slug,
-        "file_name": file_name,
-        "mime_type": "video/x-matroska",
-        "file_size_bytes": safe_file_size,
-        "hf_raw_url": hf_raw_url,
-        "poster_url": tmdb_meta.get("poster_url"),
-        "backdrop_url": tmdb_meta.get("backdrop_url"),
-        "description": tmdb_meta.get("description"),
-        "rating": tmdb_meta.get("rating", 8.9),
-        "release_year": tmdb_meta.get("release_year", 2026),
-        "duration": tmdb_meta.get("duration", "2h 15m"),
-        "default_quality_label": quality_label,
-        "is_theater_print": is_theater_print,
-        "obfuscated": True
-    }
+    # Multi-Mirror Mesh URLs
+    mirror_repos = [f"akthereddragon/{r}" for r in MESH_REPOSITORIES if f"akthereddragon/{r}" != target_repo][:3]
+    mirror_urls = [
+        f"https://huggingface.co/datasets/{m_repo}/resolve/main/{quoted_rel_path}"
+        for m_repo in mirror_repos
+    ]
 
-    movie_endpoint = f"{supabase_url.rstrip('/')}/rest/v1/movies?on_conflict=slug"
-    res = requests.post(movie_endpoint, headers=headers, json=movie_payload, timeout=10)
+    clean_display_filename = (extracted_meta and extracted_meta.get("clean_filename")) or f"{clean_title} [{quality}].mkv"
 
-    # Fallback if DB schema doesn't have is_theater_print column yet
-    if not res.ok and "is_theater_print" in res.text:
-        movie_payload.pop("is_theater_print", None)
-        res = requests.post(movie_endpoint, headers=headers, json=movie_payload, timeout=10)
+    is_series = bool(extracted_meta.get("series_title")) or (extracted_meta.get("media_type") in ("series_single", "series_batch")) or (extracted_meta.get("category") in ("SERIES_SINGLE", "SERIES_BATCH"))
 
-    movie_id = None
-    if res.ok:
-        try:
-            res_json = res.json()
-            if isinstance(res_json, list) and len(res_json) > 0:
-                movie_id = res_json[0].get("id")
-        except Exception:
-            pass
-
-    if not movie_id:
-        # Fallback query by slug if resolution header returned empty or on conflict
-        get_headers = {
-            "apikey": supabase_key,
-            "Authorization": f"Bearer {supabase_key}"
-        }
+    if not is_series:
+        # 1. Check if Master Movie Record already exists by slug or title
+        movie_id = None
         get_res = requests.get(
-            f"{supabase_url.rstrip('/')}/rest/v1/movies?slug=eq.{requests.utils.quote(slug)}&select=id",
-            headers=get_headers,
+            f"{supabase_url.rstrip('/')}/rest/v1/movies?or=(slug.eq.{requests.utils.quote(slug)},title.ilike.{requests.utils.quote(clean_title)})&select=id,title,slug,poster_url",
+            headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"},
             timeout=5
         )
         if get_res.ok and get_res.json():
-            movie_id = get_res.json()[0].get("id")
+            existing_movie = get_res.json()[0]
+            movie_id = existing_movie.get("id")
+            # If existing movie lacks poster and new has TMDB poster, patch poster
+            if (not existing_movie.get("poster_url") or "data:image/svg" in str(existing_movie.get("poster_url"))) and tmdb_meta.get("poster_url"):
+                requests.patch(
+                    f"{supabase_url.rstrip('/')}/rest/v1/movies?id=eq.{movie_id}",
+                    headers=headers,
+                    json={"poster_url": tmdb_meta.get("poster_url"), "backdrop_url": tmdb_meta.get("backdrop_url")},
+                    timeout=5
+                )
 
-    if not movie_id:
-        print(f"  ❌ [SUPABASE DB] Error upserting movie record for {clean_title}: {res.status_code} - {res.text}")
-        return
+        if not movie_id:
+            # Upsert Movie Master Record in `public.movies`
+            movie_payload = {
+                "title": clean_title,
+                "slug": slug,
+                "file_name": file_name,
+                "clean_filename": clean_display_filename,
+                "mime_type": "video/x-matroska",
+                "file_size_bytes": safe_file_size,
+                "total_bytes": safe_file_size,
+                "storage_type": "single_file_mesh",
+                "hf_raw_url": hf_raw_url,
+                "mirrors": mirror_urls,
+                "poster_url": tmdb_meta.get("poster_url"),
+                "backdrop_url": tmdb_meta.get("backdrop_url"),
+                "description": tmdb_meta.get("description"),
+                "rating": tmdb_meta.get("rating", 8.9),
+                "release_year": tmdb_meta.get("release_year", 2026),
+                "duration": tmdb_meta.get("duration", "2h 15m"),
+                "default_quality_label": quality_label,
+                "is_theater_print": is_theater_print,
+                "obfuscated": True
+            }
 
-    print(f"  ✅ [SUPABASE DB] Master Movie Record active -> ID: {movie_id} ({clean_title}) [TheaterPrint: {is_theater_print}]")
+            movie_endpoint = f"{supabase_url.rstrip('/')}/rest/v1/movies?on_conflict=slug"
+            res = requests.post(movie_endpoint, headers=headers, json=movie_payload, timeout=10)
 
-    # 2. Register/Upsert Quality Specific Record in `public.movie_files`
-    file_payload = {
-        "movie_id": movie_id,
-        "quality": quality,
-        "rip_type": rip_type,
-        "codec": codec,
-        "audio_languages": audio_languages,
-        "quality_label": quality_label,
-        "file_name": file_name,
-        "mime_type": "video/x-matroska",
-        "file_size_bytes": safe_file_size,
-        "hf_raw_url": hf_raw_url,
-        "is_theater_print": is_theater_print,
-        "obfuscated": True
-    }
+            # Fallback if DB schema doesn't have is_theater_print column yet
+            if not res.ok and "is_theater_print" in res.text:
+                movie_payload.pop("is_theater_print", None)
+                res = requests.post(movie_endpoint, headers=headers, json=movie_payload, timeout=10)
 
-    get_file_res = requests.get(
-        f"{supabase_url.rstrip('/')}/rest/v1/movie_files?movie_id=eq.{movie_id}&quality=eq.{quality}&select=id",
-        headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"},
-        timeout=5
-    )
+            if res.ok:
+                try:
+                    res_json = res.json()
+                    if isinstance(res_json, list) and len(res_json) > 0:
+                        movie_id = res_json[0].get("id")
+                except Exception:
+                    pass
 
-    movie_file_endpoint = f"{supabase_url.rstrip('/')}/rest/v1/movie_files"
-    if get_file_res.ok and get_file_res.json():
-        existing_file_id = get_file_res.json()[0].get("id")
-        # PATCH existing record
-        patch_res = requests.patch(
-            f"{movie_file_endpoint}?id=eq.{existing_file_id}",
-            headers=headers,
-            json=file_payload,
-            timeout=10
+            if not movie_id:
+                get_res_again = requests.get(
+                    f"{supabase_url.rstrip('/')}/rest/v1/movies?slug=eq.{requests.utils.quote(slug)}&select=id",
+                    headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"},
+                    timeout=5
+                )
+                if get_res_again.ok and get_res_again.json():
+                    movie_id = get_res_again.json()[0].get("id")
+
+        if not movie_id:
+            print(f"  ❌ [SUPABASE DB] Error upserting movie record for {clean_title}")
+            return None, (time.time() - t_db_start) * 1000.0
+
+        print(f"  ✅ [SUPABASE DB] Master Movie Record active -> ID: {movie_id} ({clean_title}) [TheaterPrint: {is_theater_print}]")
+
+        # 2. Register/Upsert Quality Specific Record in `public.movie_files`
+        file_payload = {
+            "movie_id": movie_id,
+            "quality": quality,
+            "rip_type": rip_type,
+            "codec": codec,
+            "audio_languages": audio_languages,
+            "quality_label": quality_label,
+            "file_name": file_name,
+            "clean_filename": clean_display_filename,
+            "mime_type": "video/x-matroska",
+            "file_size_bytes": safe_file_size,
+            "total_bytes": safe_file_size,
+            "storage_type": "single_file_mesh",
+            "hf_raw_url": hf_raw_url,
+            "mirrors": mirror_urls,
+            "is_theater_print": is_theater_print,
+            "obfuscated": True
+        }
+
+        get_file_res = requests.get(
+            f"{supabase_url.rstrip('/')}/rest/v1/movie_files?movie_id=eq.{movie_id}&quality=eq.{quality}&select=id",
+            headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"},
+            timeout=5
         )
-        if patch_res.ok:
-            print(f"  ⚡ [SUPABASE DB SYNC] 🟢 Updated `movie_files` [{quality_label}] -> File ID: #{existing_file_id} | Master ID: #{movie_id}")
+
+        movie_file_endpoint = f"{supabase_url.rstrip('/')}/rest/v1/movie_files"
+        if get_file_res.ok and get_file_res.json():
+            existing_file_id = get_file_res.json()[0].get("id")
+            patch_res = requests.patch(
+                f"{movie_file_endpoint}?id=eq.{existing_file_id}",
+                headers=headers,
+                json=file_payload,
+                timeout=10
+            )
+            if patch_res.ok:
+                print(f"  ⚡ [SUPABASE DB SYNC] 🟢 Updated `movie_files` [{quality_label}] -> File ID: #{existing_file_id} | Master ID: #{movie_id}")
+            else:
+                print(f"  ⚠️ [SUPABASE DB SYNC] Patch `movie_files` error: {patch_res.status_code} - {patch_res.text}")
         else:
-            print(f"  ⚠️ [SUPABASE DB SYNC] Patch `movie_files` error: {patch_res.status_code} - {patch_res.text}")
+            post_res = requests.post(
+                movie_file_endpoint,
+                headers=headers,
+                json=file_payload,
+                timeout=10
+            )
+            if post_res.ok:
+                print(f"  ⚡ [SUPABASE DB SYNC] 🟢 Inserted `movie_files` [{quality}] -> Linked to Master ID: #{movie_id}")
+            else:
+                print(f"  ⚠️ [SUPABASE DB SYNC] Insert `movie_files` error: {post_res.status_code} - {post_res.text}")
     else:
-        # POST new record
-        post_res = requests.post(
-            movie_file_endpoint,
-            headers=headers,
-            json=file_payload,
-            timeout=10
-        )
-        if post_res.ok:
-            print(f"  ⚡ [SUPABASE DB SYNC] 🟢 Inserted `movie_files` [{quality}] -> Linked to Master ID: #{movie_id}")
-        else:
-            print(f"  ⚠️ [SUPABASE DB SYNC] Insert `movie_files` error: {post_res.status_code} - {post_res.text}")
+        # 3. Upsert Master Series Record in `public.series`
+        series_title = extracted_meta.get("series_title") or clean_title
+        series_slug = re.sub(r'[^a-z0-9]+', '-', series_title.lower()).strip('-') or "series"
+        series_payload = {
+            "title": series_title,
+            "slug": series_slug,
+            "poster_url": tmdb_meta.get("poster_url"),
+            "backdrop_url": tmdb_meta.get("backdrop_url"),
+            "description": tmdb_meta.get("description") or f"Watch all seasons and episodes of {series_title} in Full HD.",
+            "release_year": tmdb_meta.get("release_year", 2026),
+            "rating": tmdb_meta.get("rating", 8.8),
+            "total_seasons": max(1, extracted_meta.get("season", 1)),
+            "total_episodes": max(1, extracted_meta.get("episode_end", 1)),
+            "status": "Returning Series"
+        }
+        series_endpoint = f"{supabase_url.rstrip('/')}/rest/v1/series?on_conflict=slug"
+        res_s = requests.post(series_endpoint, headers=headers, json=series_payload, timeout=10)
+        s_id = None
+        if res_s.ok and isinstance(res_s.json(), list) and len(res_s.json()) > 0:
+            s_id = res_s.json()[0].get("id")
+        if not s_id:
+            get_headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+            get_res = requests.get(f"{supabase_url.rstrip('/')}/rest/v1/series?slug=eq.{requests.utils.quote(series_slug)}&select=id", headers=get_headers, timeout=5)
+            if get_res.ok and get_res.json():
+                s_id = get_res.json()[0].get("id")
+
+        if not s_id:
+            print(f"  ❌ [SUPABASE DB] Error upserting series record for {series_title}: {res_s.status_code}")
+            return None, (time.time() - t_db_start) * 1000.0
+
+        print(f"  ✅ [SUPABASE DB] Master Series Record active -> ID: {s_id} ({series_title})")
+        movie_id = s_id
+
+        # 4. Upsert Series Episode File in `public.series_files`
+        season_num = extracted_meta.get("season", 1)
+        ep_start = extracted_meta.get("episode", 1)
+        ep_end = extracted_meta.get("episode_end", ep_start)
+        is_batch = extracted_meta.get("is_batch", False)
+
+        sfile_payload = {
+            "series_id": s_id,
+            "season_number": season_num,
+            "episode_number": ep_start,
+            "episode_end": ep_end,
+            "is_batch": is_batch,
+            "batch_range": extracted_meta.get("batch_range"),
+            "episode_title": extracted_meta.get("batch_range") if is_batch else f"Episode {ep_start}",
+            "quality": quality,
+            "quality_label": quality_label,
+            "file_name": file_name,
+            "clean_filename": clean_display_filename,
+            "mime_type": "video/x-matroska",
+            "file_size_bytes": safe_file_size,
+            "total_bytes": safe_file_size,
+            "storage_type": "single_file_mesh",
+            "hf_raw_url": hf_raw_url,
+            "mirrors": mirror_urls,
+            "rip_type": rip_type,
+            "codec": codec,
+            "audio_languages": ", ".join(audio_languages) if isinstance(audio_languages, list) else audio_languages
+        }
+        sfile_endpoint = f"{supabase_url.rstrip('/')}/rest/v1/series_files?on_conflict=series_id,season_number,episode_number,episode_end,quality"
+        sfile_res = requests.post(sfile_endpoint, headers=headers, json=sfile_payload, timeout=10)
+        if sfile_res.ok:
+            print(f"  ⚡ [SUPABASE DB SYNC] 🟢 Synced `series_files` S{season_num:02d} Ep {ep_start}-{ep_end} -> Series ID: #{s_id}")
+
+    db_latency_ms = (time.time() - t_db_start) * 1000.0
+    return movie_id, db_latency_ms
 
 
 def load_service_accounts_from_supabase_or_env(supabase_url: str, supabase_key: str) -> list:
@@ -911,7 +996,7 @@ def load_service_accounts_from_supabase_or_env(supabase_url: str, supabase_key: 
                     if sa_list:
                         print(f"  ✅ [SUPABASE DB] Successfully fetched {len(sa_list)} Service Account(s) from table [{tbl}].")
                         break
-            except Exception as sb_err:
+            except Exception:
                 pass
 
     # 2. Fallback to SERVICE_ACCOUNTS_JSON / GOOGLE_SERVICE_ACCOUNT_JSON
@@ -1036,7 +1121,7 @@ def fetch_gdrive_folder_files(folder_id: str, access_token: str = "", folder_nam
     headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
     api_key = os.getenv("GOOGLE_API_KEY", "")
     query = f"'{folder_id}' in parents and trashed = false"
-    url = f"https://www.googleapis.com/drive/v3/files?q={requests.utils.quote(query)}&fields=files(id,name,size,mimeType)&pageSize=1000"
+    url = f"https://www.googleapis.com/drive/v3/files?q={requests.utils.quote(query)}&fields=files(id,name,size,mimeType)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true"
     if not access_token and api_key:
         url += f"&key={api_key}"
     
@@ -1060,150 +1145,387 @@ def fetch_gdrive_folder_files(folder_id: str, access_token: str = "", folder_nam
     return all_files
 
 
+class ServiceAccountMesh:
+    """
+    Enterprise DSA Component: Thread-Safe Circular Ring Buffer for Multi-SA Dynamic Rotation,
+    Adaptive Health Scoring, and Real-Time Monitored Quota Accounting (750 GB / Day per SA limit).
+    """
+    def __init__(self, sa_list: list):
+        self.sa_list = sa_list or []
+        self.tokens = []
+        self.sa_entries = []
+        self.active_index = 0
+        self.lock = threading.Lock()
+        self.DAILY_LIMIT_BYTES = 750 * (1024 ** 3)  # 750 GB GDrive daily quota
+        self.bytes_consumed = [0] * max(1, len(self.sa_list))
+        self.rotations_count = 0
+
+        # Pre-generate access tokens from available SAs and initialize health tracking
+        for i, sa in enumerate(self.sa_list):
+            t = get_gdrive_access_token_from_sa(sa)
+            if t:
+                self.tokens.append(t)
+                self.sa_entries.append({
+                    "index": i,
+                    "email": sa.get("email", f"sa-{i+1}@..."),
+                    "token": t,
+                    "healthy": True,
+                    "errors": 0,
+                    "successes": 0
+                })
+
+    def get_candidate_tokens(self, start_idx: int = 0) -> list[str]:
+        """
+        Returns a prioritized list of tokens for range downloads or direct stream fallback.
+        Prioritizes known-healthy tokens (lowest errors), rotating starting offset.
+        """
+        with self.lock:
+            if not self.sa_entries:
+                return self.tokens.copy() if self.tokens else [""]
+            n = len(self.sa_entries)
+            perm = [(start_idx + i) % n for i in range(n)]
+            # Sort by error count ascending to prioritize healthy accounts
+            sorted_indices = sorted(perm, key=lambda idx: self.sa_entries[idx]["errors"])
+            return [self.sa_entries[idx]["token"] for idx in sorted_indices]
+
+    def report_token_result(self, token: str, success: bool, status_code: int = 200):
+        """Thread-safe telemetry to score SA token health and dynamically isolate 403 quota burned accounts"""
+        with self.lock:
+            for entry in self.sa_entries:
+                if entry["token"] == token:
+                    if success:
+                        entry["healthy"] = True
+                        entry["successes"] += 1
+                        if entry["errors"] > 0:
+                            entry["errors"] = max(0, entry["errors"] - 1)
+                    else:
+                        entry["errors"] += 1
+                        if status_code in (403, 429):
+                            entry["healthy"] = False
+                    break
+
+    def get_token(self, offset: int = 0) -> str:
+        with self.lock:
+            if not self.tokens:
+                return ""
+            idx = (self.active_index + offset) % len(self.tokens)
+            return self.tokens[idx]
+
+    def rotate(self) -> str:
+        with self.lock:
+            if not self.tokens:
+                return ""
+            self.active_index = (self.active_index + 1) % len(self.tokens)
+            self.rotations_count += 1
+            return self.tokens[self.active_index]
+
+    def record_usage(self, byte_count: int, offset: int = 0):
+        with self.lock:
+            if self.tokens and len(self.bytes_consumed) > 0:
+                idx = (self.active_index + offset) % len(self.bytes_consumed)
+                self.bytes_consumed[idx] += byte_count
+
+    def get_active_quota_health(self) -> tuple[str, float, float, float]:
+        """Returns: (active_email, consumed_gb, pct_remaining, gb_remaining)"""
+        with self.lock:
+            if not self.sa_entries:
+                return "Public GDrive (No SA)", 0.0, 100.0, 750.0
+            healthy_entries = [e for e in self.sa_entries if e["healthy"]]
+            target_entry = healthy_entries[0] if healthy_entries else self.sa_entries[self.active_index % len(self.sa_entries)]
+            email = target_entry.get("email", "sa-mesh@...")
+            idx = target_entry.get("index", 0)
+            consumed_bytes = self.bytes_consumed[idx] if idx < len(self.bytes_consumed) else 0
+            consumed_gb = consumed_bytes / (1024 ** 3)
+            pct_left = max(0.0, 100.0 - (consumed_bytes / self.DAILY_LIMIT_BYTES * 100.0))
+            gb_left = max(0.0, (self.DAILY_LIMIT_BYTES - consumed_bytes) / (1024 ** 3))
+            return email, consumed_gb, pct_left, gb_left
+
+
 def download_gdrive_range_segment(
     file_id: str,
-    access_token: str,
+    sa_mesh_or_tokens,
     dest_path: Path,
     start_byte: int,
     end_byte: int,
     progress_lock: threading.Lock,
-    stats: dict
+    stats: dict,
+    thread_idx: int = 0
 ):
-    """Downloads a specific byte range segment of a GDrive file to a pre-allocated disk offset"""
-    url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-    headers = {
-        "Range": f"bytes={start_byte}-{end_byte}"
-    }
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
-
-    with requests.get(url, headers=headers, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        with open(dest_path, 'r+b') as f:
-            f.seek(start_byte)
-            for chunk in r.iter_content(chunk_size=2 * 1024 * 1024):  # 2MB chunks
-                if chunk:
-                    f.write(chunk)
-                    with progress_lock:
-                        stats["downloaded"] += len(chunk)
-
-
-def download_gdrive_stream(file_id: str, access_tokens, dest_path: Path, expected_size: int = 0, num_threads: int = 8, sa_offset: int = 0):
     """
-    Downloads GDrive file using an 8-Thread Concurrent Byte-Range Stream Mesh.
-    Rotates Service Account Access Tokens dynamically across byte-range threads
-    to bypass per-SA byte rate limiting and TCP buffer saturation.
+    Downloads a specific byte range segment of a GDrive file to a pre-allocated disk offset.
+    Features Dynamic Per-Thread Hot Swap across SA Tokens:
+    - If a token hits 403 (Quota Exceeded / Forbidden) or 429, it automatically hot-swaps
+      to the next candidate token and resumes from current downloaded offset within the segment.
+    - Zero data loss: disk seek is always updated to (current_byte).
     """
-    tokens = access_tokens if isinstance(access_tokens, list) else ([access_tokens] if access_tokens else [])
-    main_token = tokens[0] if tokens else ""
-    url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-    headers = {"Authorization": f"Bearer {main_token}"} if main_token else {}
-    
+    if isinstance(sa_mesh_or_tokens, ServiceAccountMesh):
+        sa_mesh = sa_mesh_or_tokens
+        candidate_tokens = sa_mesh.get_candidate_tokens(start_idx=thread_idx)
+    elif isinstance(sa_mesh_or_tokens, list):
+        sa_mesh = None
+        n = len(sa_mesh_or_tokens)
+        candidate_tokens = [sa_mesh_or_tokens[(thread_idx + k) % n] for k in range(n)] if n > 0 else [""]
+    else:
+        sa_mesh = None
+        candidate_tokens = [sa_mesh_or_tokens] if sa_mesh_or_tokens else [""]
+
+    url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&supportsAllDrives=true"
+    current_byte = start_byte
+    success = False
+    last_err = None
+
+    for attempt, access_token in enumerate(candidate_tokens):
+        if current_byte > end_byte:
+            success = True
+            break
+
+        headers = {
+            "Range": f"bytes={current_byte}-{end_byte}"
+        }
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+
+        try:
+            with requests.get(url, headers=headers, stream=True, timeout=60) as r:
+                if r.status_code in (403, 429):
+                    if sa_mesh:
+                        sa_mesh.report_token_result(access_token, success=False, status_code=r.status_code)
+                    last_err = f"HTTP {r.status_code} ({r.reason})"
+                    continue
+
+                # If server returns 200 instead of 206 for non-zero offset, Range is ignored
+                if start_byte > 0 and r.status_code == 200:
+                    raise RuntimeError("Server returned 200 OK instead of 206 Partial Content for byte range request.")
+
+                r.raise_for_status()
+
+                if sa_mesh:
+                    sa_mesh.report_token_result(access_token, success=True, status_code=r.status_code)
+
+                with open(dest_path, 'r+b') as f:
+                    f.seek(current_byte)
+                    for chunk in r.iter_content(chunk_size=2 * 1024 * 1024):  # 2MB chunks
+                        if chunk:
+                            f.write(chunk)
+                            chunk_len = len(chunk)
+                            current_byte += chunk_len
+                            with progress_lock:
+                                stats["downloaded"] += chunk_len
+
+                if current_byte > end_byte:
+                    success = True
+                    break
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            status_code = getattr(getattr(e, 'response', None), 'status_code', 0)
+            if sa_mesh:
+                sa_mesh.report_token_result(access_token, success=False, status_code=status_code)
+            continue
+
+    if not success and current_byte <= end_byte:
+        raise RuntimeError(f"Thread-{thread_idx} segment [{start_byte}..{end_byte}] failed across available SAs. Last error: {last_err}")
+
+
+def download_gdrive_stream(
+    file_id: str,
+    sa_mesh_or_tokens,
+    dest_path: Path,
+    expected_size: int = 0,
+    num_threads: int = 8,
+    sa_offset: int = 0,
+    file_label: str = "Video"
+) -> tuple[float, float]:
+    """
+    Downloads GDrive file using an Enterprise Adaptive 2-Tier Stream Architecture:
+      - Tier 1: 8-Thread SA Concurrent Byte-Range Stream Mesh with Per-Thread Dynamic SA Hot Swap.
+      - Tier 2: Seamless Exhaustive Multi-SA Direct Stream (8MB Buffer Chunks) on Range errors.
+      - Guaranteed Zero Zombie Thread Leaks (try...finally Thread Guillotine).
+      - Quantized Delta Telemetry (10% step reporting, zero 0.0% spam floods).
+    Returns: (download_duration_sec, download_speed_mbps)
+    """
+    if isinstance(sa_mesh_or_tokens, ServiceAccountMesh):
+        sa_mesh = sa_mesh_or_tokens
+        tokens = sa_mesh.tokens
+    elif isinstance(sa_mesh_or_tokens, list):
+        tokens = sa_mesh_or_tokens
+        sa_mesh = None
+    else:
+        tokens = [sa_mesh_or_tokens] if sa_mesh_or_tokens else []
+        sa_mesh = None
+
+    token_count = len(tokens)
+    url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&supportsAllDrives=true"
+
     # 1. Determine total size
     total_bytes = expected_size
     if not total_bytes:
-        try:
-            res = requests.head(url, headers=headers, timeout=15)
-            total_bytes = int(res.headers.get("content-length", 0))
-        except Exception:
-            total_bytes = 0
+        probe_tokens = sa_mesh.get_candidate_tokens(start_idx=sa_offset) if sa_mesh else tokens
+        for pt in probe_tokens[:3]:
+            try:
+                res = requests.head(url, headers={"Authorization": f"Bearer {pt}"} if pt else {}, timeout=12)
+                if res.ok:
+                    total_bytes = int(res.headers.get("content-length", 0))
+                    if total_bytes > 0:
+                        break
+            except Exception:
+                pass
 
-    # Fallback to single stream if file is small (< 10MB) or size is unknown
-    if total_bytes < 10 * 1024 * 1024 or num_threads <= 1:
-        with requests.get(url, headers=headers, stream=True, timeout=60) as r:
-            r.raise_for_status()
-            total_bytes = total_bytes or int(r.headers.get('content-length', 0))
-            downloaded = 0
-            start_time = time.time()
-            last_log_time = start_time
-            with open(dest_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=2 * 1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        now = time.time()
-                        if now - last_log_time >= 3.0 or (total_bytes and downloaded >= total_bytes):
-                            last_log_time = now
-                            elapsed = max(now - start_time, 0.001)
-                            speed_mbps = (downloaded / (1024 * 1024)) / elapsed
-                            dl_mb = downloaded / (1024 * 1024)
-                            if total_bytes:
-                                total_mb = total_bytes / (1024 * 1024)
-                                pct = min(100.0, (downloaded / total_bytes) * 100)
-                                remaining = max(0, total_bytes - downloaded)
-                                eta_sec = int(remaining / (speed_mbps * 1024 * 1024)) if speed_mbps > 0 else 0
-                                filled = int(20 * downloaded // total_bytes)
-                                bar = '█' * min(20, filled) + '░' * max(0, 20 - filled)
-                                print(f"  📥 [{pct:5.1f}%] [{bar}] {dl_mb:6.1f}/{total_mb:.1f} MB | ⚡ {speed_mbps:5.1f} MB/s | ⏱️ ETA: {eta_sec}s", flush=True)
-                            else:
-                                print(f"  📥 Downloaded: {dl_mb:.1f} MB | ⚡ {speed_mbps:.1f} MB/s", flush=True)
-        return
-
-    # 2. Pre-allocate target destination file size
-    with open(dest_path, 'wb') as f:
-        f.truncate(total_bytes)
-
-    # 3. Calculate 8 Byte-Ranges
-    segment_size = total_bytes // num_threads
-    ranges = []
-    for i in range(num_threads):
-        start = i * segment_size
-        end = (start + segment_size - 1) if i < num_threads - 1 else (total_bytes - 1)
-        ranges.append((start, end))
-
-    token_count = len(tokens)
-    print(f"  ⚡ Launching {num_threads}-Thread SA-Mesh Byte-Range Downloader ({total_bytes/(1024*1024):.1f} MB across {token_count} SA tokens)...", flush=True)
-
-    progress_lock = threading.Lock()
-    stats = {"downloaded": 0}
     start_time = time.time()
-    done_flag = threading.Event()
+    tier1_attempt = (total_bytes >= 10 * 1024 * 1024) and (num_threads > 1) and (token_count > 0)
+    tier1_success = False
 
-    # 4. Background Telemetry Logger Thread (Throttled for Ultra-Clean UI)
-    def log_progress():
-        while not done_flag.is_set():
-            time.sleep(3.0)
-            now = time.time()
-            with progress_lock:
-                dl = stats["downloaded"]
-            elapsed = max(now - start_time, 0.001)
-            speed_mbps = (dl / (1024 * 1024)) / elapsed
-            dl_mb = dl / (1024 * 1024)
-            total_mb = total_bytes / (1024 * 1024)
-            pct = min(100.0, (dl / total_bytes) * 100)
-            remaining = max(0, total_bytes - dl)
-            eta_sec = int(remaining / (speed_mbps * 1024 * 1024)) if speed_mbps > 0 else 0
-            filled = int(20 * dl // total_bytes)
-            bar = '█' * min(20, filled) + '░' * max(0, 20 - filled)
-            print(f"  📥 [{pct:5.1f}%] [{bar}] {dl_mb:6.0f}/{total_mb:.0f} MB | ⚡ {speed_mbps:5.1f} MB/s | ⏱️ {eta_sec}s", flush=True)
+    if tier1_attempt:
+        with open(dest_path, 'wb') as f:
+            f.truncate(total_bytes)
 
-    logger_thread = threading.Thread(target=log_progress, daemon=True)
-    logger_thread.start()
+        segment_size = total_bytes // num_threads
+        ranges = []
+        for i in range(num_threads):
+            start = i * segment_size
+            end = (start + segment_size - 1) if i < num_threads - 1 else (total_bytes - 1)
+            ranges.append((start, end))
 
-    # 5. Submit Range Workers with Round-Robin Service Account Tokens
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        futures = [
-            executor.submit(
-                download_gdrive_range_segment,
-                file_id,
-                tokens[(sa_offset + i) % token_count] if token_count > 0 else "",
-                dest_path,
-                start,
-                end,
-                progress_lock,
-                stats
-            )
-            for i, (start, end) in enumerate(ranges)
-        ]
-        for future in as_completed(futures):
-            future.result()
+        print(f"  ⚡ [TIER 1] Launching {num_threads}-Thread SA-Mesh Byte-Range Downloader ({total_bytes/(1024*1024):.1f} MB across {token_count} SA tokens)...", flush=True)
 
-    done_flag.set()
-    logger_thread.join(timeout=1.0)
-    
+        progress_lock = threading.Lock()
+        stats = {"downloaded": 0}
+        done_flag = threading.Event()
+
+        def log_progress():
+            last_logged_bucket = -1
+            last_log_wall = time.time()
+            last_bytes_logged = 0
+            while not done_flag.is_set():
+                time.sleep(1.0)
+                with progress_lock:
+                    dl = stats["downloaded"]
+                now = time.time()
+                if total_bytes > 0:
+                    pct = min(100.0, (dl / total_bytes) * 100)
+                    bucket = int(pct // 10) * 10
+                    if (bucket > last_logged_bucket and bucket > 0) or (now - last_log_wall >= 5.0 and dl > last_bytes_logged and dl > 0):
+                        last_logged_bucket = bucket
+                        last_log_wall = now
+                        last_bytes_logged = dl
+                        elapsed = max(now - start_time, 0.001)
+                        speed_mbps = (dl / (1024 * 1024)) / elapsed
+                        dl_mb = dl / (1024 * 1024)
+                        total_mb = total_bytes / (1024 * 1024)
+                        remaining = max(0, total_bytes - dl)
+                        eta_sec = int(remaining / (speed_mbps * 1024 * 1024)) if speed_mbps > 0 else 0
+                        filled = min(20, int(20 * dl // total_bytes))
+                        bar = '█' * filled + '░' * (20 - filled)
+                        print(f"  📥 [{pct:5.1f}%] [{bar}] {dl_mb:6.0f}/{total_mb:.0f} MB | ⚡ {speed_mbps:5.1f} MB/s | ⏱️ {eta_sec}s", flush=True)
+
+        logger_thread = threading.Thread(target=log_progress, daemon=True)
+        logger_thread.start()
+
+        try:
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                futures = [
+                    executor.submit(
+                        download_gdrive_range_segment,
+                        file_id,
+                        sa_mesh or tokens,
+                        dest_path,
+                        start,
+                        end,
+                        progress_lock,
+                        stats,
+                        (sa_offset + i)
+                    )
+                    for i, (start, end) in enumerate(ranges)
+                ]
+                for future in as_completed(futures):
+                    future.result()
+            tier1_success = True
+        except Exception as t1_err:
+            tier1_success = False
+            print(f"  ⚠️ [RANGE STREAM REVISE] GDrive Range restricted on '{file_label}' ({t1_err}). Activating Tier-2 Exhaustive Multi-SA Direct Stream...", flush=True)
+        finally:
+            done_flag.set()
+            logger_thread.join(timeout=1.0)
+
+    # TIER 2: Seamless Exhaustive Multi-SA Direct Stream Fallback
+    if not tier1_success:
+        t2_candidates = sa_mesh.get_candidate_tokens(start_idx=sa_offset) if sa_mesh else (tokens if tokens else [""])
+        t2_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&supportsAllDrives=true"
+        t2_success = False
+        t2_last_err = None
+
+        for t2_idx, t2_token in enumerate(t2_candidates):
+            t2_headers = {"Authorization": f"Bearer {t2_token}"} if t2_token else {}
+            try:
+                with requests.get(t2_url, headers=t2_headers, stream=True, timeout=90) as r:
+                    if r.status_code in (403, 429):
+                        err_text = r.text[:200] if r.text else r.reason
+                        if sa_mesh:
+                            sa_mesh.report_token_result(t2_token, success=False, status_code=r.status_code)
+                        t2_last_err = f"HTTP {r.status_code} ({err_text})"
+                        continue
+
+                    r.raise_for_status()
+
+                    if sa_mesh:
+                        sa_mesh.report_token_result(t2_token, success=True, status_code=r.status_code)
+
+                    content_len = int(r.headers.get('content-length', total_bytes or 0))
+                    eff_total = content_len or total_bytes
+                    downloaded = 0
+                    start_t2 = time.time()
+                    last_pct_t2 = -1
+                    last_log_t2 = start_t2
+                    last_bytes_t2 = 0
+
+                    with open(dest_path, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):  # 8MB High-Throughput Buffers
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                now = time.time()
+                                if eff_total > 0:
+                                    pct = min(100.0, (downloaded / eff_total) * 100)
+                                    bucket = int(pct // 10) * 10
+                                    if (bucket > last_pct_t2 and bucket > 0) or (now - last_log_t2 >= 5.0 and downloaded > last_bytes_t2 and downloaded > 0):
+                                        last_pct_t2 = bucket
+                                        last_log_t2 = now
+                                        last_bytes_t2 = downloaded
+                                        elapsed = max(now - start_t2, 0.001)
+                                        spd = (downloaded / (1024 * 1024)) / elapsed
+                                        dl_mb = downloaded / (1024 * 1024)
+                                        tot_mb = eff_total / (1024 * 1024)
+                                        filled = min(20, int(20 * downloaded // eff_total))
+                                        bar = '█' * filled + '░' * (20 - filled)
+                                        rem_s = int((eff_total - downloaded) / (spd * 1024 * 1024)) if spd > 0 else 0
+                                        print(f"  📥 [Tier-2 Direct] [{pct:5.1f}%] [{bar}] {dl_mb:6.0f}/{tot_mb:.0f} MB | ⚡ {spd:5.1f} MB/s | ⏱️ {rem_s}s", flush=True)
+                                else:
+                                    if now - last_log_t2 >= 5.0 and downloaded > last_bytes_t2:
+                                        last_log_t2 = now
+                                        last_bytes_t2 = downloaded
+                                        dl_mb = downloaded / (1024 * 1024)
+                                        spd = dl_mb / max(now - start_t2, 0.001)
+                                        print(f"  📥 [Tier-2 Direct] Downloaded: {dl_mb:.1f} MB | ⚡ {spd:.1f} MB/s", flush=True)
+
+                    if not total_bytes:
+                        total_bytes = downloaded
+                    t2_success = True
+                    break
+            except Exception as t2_err:
+                t2_last_err = t2_err
+                if sa_mesh:
+                    sa_mesh.report_token_result(t2_token, success=False)
+                continue
+
+        if not t2_success:
+            raise RuntimeError(f"All download tiers exhausted for '{file_label}'. Last error: {t2_last_err}")
+
+    if sa_mesh:
+        sa_mesh.record_usage(total_bytes)
+
     elapsed = max(time.time() - start_time, 0.001)
     final_speed = (total_bytes / (1024 * 1024)) / elapsed
-    print(f"  ✅ [DOWNLOAD COMPLETE] {total_bytes/(1024*1024):.1f} MB in {elapsed:.1f}s | ⚡ Peak Speed: {final_speed:.1f} MB/s", flush=True)
+    print(f"  ✅ [DOWNLOAD COMPLETE] {total_bytes/(1024*1024):.1f} MB in {elapsed:.1f}s | ⚡ Transfer Speed: {final_speed:.1f} MB/s", flush=True)
+    return elapsed, final_speed
 
 
 # ================================================================================
@@ -1225,17 +1547,11 @@ def run_migration_logic():
 
     # 0. Acquire GDrive Access Token Pool from Service Account Mesh
     sa_list = load_service_accounts_from_supabase_or_env(supabase_url, supabase_key)
-    sa_tokens = []
-    if sa_list:
-        print(f"  🔑 Loaded {len(sa_list)} Service Account(s). Pre-generating SA Mesh Access Token Pool...")
-        for sa in sa_list:
-            token_candidate = get_gdrive_access_token_from_sa(sa)
-            if token_candidate:
-                sa_tokens.append(token_candidate)
-        if sa_tokens:
-            print(f"  ✅ [SA MESH ACTIVE] {len(sa_tokens)}/{len(sa_list)} Service Account Tokens Active & Ready for Byte-Range Rotation!")
+    sa_mesh = ServiceAccountMesh(sa_list)
+    if sa_mesh.tokens:
+        print(f"  ✅ [SA MESH ACTIVE] {len(sa_mesh.tokens)}/{len(sa_list)} Service Account Tokens Active & Ready for Byte-Range Rotation!")
 
-    access_token = sa_tokens[0] if sa_tokens else ""
+    access_token = sa_mesh.get_token(0) if sa_mesh.tokens else ""
     if access_token:
         print("  ✅ Ready for authenticated GDrive scanning.")
     else:
@@ -1266,8 +1582,8 @@ def run_migration_logic():
 
     start_time = time.time()
     ingested_bytes = 0
-    active_sa_email = sa_list[0].get("email", "tgstream-bot-1@...") if sa_list else "tgstream-bot-1@..."
-    sa_total_count = len(sa_list) if sa_list else 16
+    sa_email, sa_used_gb, sa_pct_left, sa_gb_left = sa_mesh.get_active_quota_health()
+    sa_total_count = len(sa_mesh.tokens) or len(sa_list) or 1
     
     # Initialize all 10 HF dataset repos in mesh distribution dictionary
     repo_distribution = {repo.split('/')[-1]: 0.0 for repo in router.repos}
@@ -1281,11 +1597,54 @@ def run_migration_logic():
         folder_stats[f_name]["total_bytes"] += int(item.get("size", 0))
 
     healing_stats = {
-        "auto_heals": 4,
-        "duplicates": 12,
+        "auto_heals": 0,
+        "duplicates": 0,
         "sa_rotations": 0,
-        "errors": 0
+        "errors": 0,
+        "peak_dl_speed": 0.0,
+        "peak_up_speed": 0.0
     }
+
+    # Fetch exact live counts from Supabase DB (Honest: no fake additions)
+    live_sb_count, live_hf_count = fetch_supabase_live_counts(supabase_url, supabase_key)
+    n_sb_val = live_sb_count
+    n_hf_val = live_hf_count
+
+    # Render Initial Startup Command Center HUD
+    init_item = {
+        "clean_title": "Initializing Shard Stream",
+        "quality": "Mesh",
+        "size_mb": 0.0,
+        "dl_pct": 0.0,
+        "dl_mb": 0.0,
+        "dl_speed": 0.0,
+        "dl_time": 0.0,
+        "hf_repo": router.repos[0].split("/")[-1],
+        "hf_speed": 0.0,
+        "hf_time": 0.0,
+        "master_id": "Ready",
+        "db_time_ms": 0.0
+    }
+    render_command_center_hud(
+        n_gdrive=total_files,
+        n_hf=n_hf_val,
+        n_supabase=n_sb_val,
+        ingested_gb=0.0,
+        total_gb=total_gdrive_gb,
+        start_time=start_time,
+        active_sa_email=sa_email,
+        sa_quota_left_pct=sa_pct_left,
+        sa_quota_left_gb=sa_gb_left,
+        sa_total_count=sa_total_count,
+        tmdb_meta={"rating": 8.9, "release_year": 2026, "title": "Hydra Mesh Active"},
+        repo_distribution=repo_distribution,
+        current_item=init_item,
+        healing_stats=healing_stats,
+        queue_items=gdrive_files[:3],
+        shard_index=shard_index,
+        total_shards=total_shards,
+        folder_stats=folder_stats
+    )
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir_path = Path(temp_dir)
@@ -1302,119 +1661,153 @@ def run_migration_logic():
             dest_path = temp_dir_path / sanitized_filename
 
             target_repo = router.get_target_repo(slug, quality)
-            total_parts = math.ceil(file_size / DEFAULT_CHUNK_SIZE) if file_size > 0 else 8
-            existing_parts = get_existing_repo_chunks(router.api, target_repo, slug, quality)
-            missing_parts = [i for i in range(1, total_parts + 1) if i not in existing_parts]
+            canonical_name = (extracted_meta and extracted_meta.get("canonical_name")) or f"{slug}_{quality}"
+            canonical_bin = (extracted_meta and extracted_meta.get("scene_bin_name")) or f"{canonical_name}.bin"
+            quoted_rel_path = requests.utils.quote(f"{slug}/{quality}/{canonical_bin}")
+            single_raw_url = f"https://huggingface.co/datasets/{target_repo}/resolve/main/{quoted_rel_path}"
 
-            tmdb_meta = fetch_tmdb_metadata(clean_title, quality)
+            # 1:1 Single File Verification on Hugging Face
+            is_already_on_hf = check_single_file_exists(router.api, target_repo, slug, quality, canonical_name=canonical_name)
 
-            current_item = {
-                "clean_title": clean_title,
-                "quality": quality,
-                "size_mb": file_size_mb,
-                "dl_pct": 100.0 if not missing_parts else 0.0,
-                "dl_mb": file_size_mb,
-                "dl_speed": 136.8,
-                "dl_time": 5.3,
-                "hf_chunks": len(existing_parts) if missing_parts else total_parts,
-                "hf_total_chunks": total_parts,
-                "hf_repo": target_repo,
-                "hf_speed": 355,
-                "master_id": file_idx + 48,
-                "db_time": 0.18
-            }
-
-            queue_items = gdrive_files[file_idx:file_idx + 3]
-
-            # Fetch exact live counts from Supabase DB
-            live_sb_count, live_hf_count = fetch_supabase_live_counts(supabase_url, supabase_key)
-            n_sb_val = live_sb_count if live_sb_count > 0 else file_idx + 48
-            n_hf_val = live_hf_count if live_hf_count > 0 else file_idx + 48
-
-            render_command_center_hud(
-                n_gdrive=total_files,
-                n_hf=n_hf_val,
-                n_supabase=n_sb_val,
-                ingested_gb=(ingested_bytes / (1024**3)),
-                total_gb=total_gdrive_gb,
-                start_time=start_time,
-                active_sa_email=active_sa_email,
-                sa_total_count=sa_total_count,
-                tmdb_meta=tmdb_meta,
-                repo_distribution=repo_distribution,
-                current_item=current_item,
-                healing_stats=healing_stats,
-                queue_items=queue_items,
-                folder_stats=folder_stats
-            )
-
-            repo_key = target_repo.split('/')[-1]
-            repo_distribution[repo_key] = repo_distribution.get(repo_key, 0.0) + file_size_gb
-
-            if file_size > 0 and not missing_parts:
-                print(f"  ⚡ [PRE-CHECK 100% COMPLETE] {clean_title} [{quality}] already fully uploaded on HF ({len(existing_parts)}/{total_parts} chunks verified)!", flush=True)
+            if file_size > 0 and is_already_on_hf:
+                print(f"  ⚡ [PRE-CHECK 100% COMPLETE] {clean_title} [{quality}] already verified on HF (1-File Native Stream)!", flush=True)
                 print(f"  ⏩ INSTANT SKIPPING GDrive Download & Bandwidth Consumption!", flush=True)
-                chunk_urls = [
-                    f"https://huggingface.co/datasets/{target_repo}/resolve/main/{slug}/{quality}/{slug}_{quality}_part{p:03d}.bin"
-                    for p in range(1, total_parts + 1)
-                ]
-                register_in_supabase(
+                item_tmdb = fetch_tmdb_metadata(clean_title, quality)
+                movie_id, db_latency = register_in_supabase(
                     clean_title=clean_title,
                     slug=slug,
                     quality=quality,
                     file_name=sanitized_filename,
                     file_size_bytes=file_size,
-                    chunk_urls=chunk_urls,
+                    hf_raw_url=single_raw_url,
                     target_repo=target_repo,
-                    tmdb_meta=tmdb_meta,
+                    tmdb_meta=item_tmdb,
                     supabase_url=supabase_url,
                     supabase_key=supabase_key,
                     extracted_meta=extracted_meta
                 )
+                healing_stats["auto_heals"] += 1
                 ingested_bytes += file_size
+                n_sb_val += 1
+                n_hf_val += 1
+                repo_key = target_repo.split('/')[-1]
+                if repo_key in repo_distribution:
+                    repo_distribution[repo_key] += file_size_gb
                 if f_name in folder_stats:
                     folder_stats[f_name]["ingested_bytes"] += file_size
                 continue
 
-            # Download stream with live progress bar
-            print(f"  📥 Streaming from GDrive -> {dest_path.name} (Missing {len(missing_parts)}/{total_parts} chunks)...", flush=True)
-            try:
-                download_gdrive_stream(file_id, sa_tokens if sa_tokens else access_token, dest_path, expected_size=file_size, sa_offset=file_idx)
-            except Exception as dl_err:
-                print(f"  ⚠️ Direct download failed ({dl_err}), skipping...", flush=True)
+            # Check available disk headroom before download
+            import shutil
+            _, _, free_disk_bytes = shutil.disk_usage(dest_path.parent)
+            free_disk_gb = free_disk_bytes / (1024 ** 3)
+
+            if file_size > (free_disk_bytes - 1024 * 1024 * 1024):  # 1GB safety margin
+                print(f"  ⚠️ [DISK HEADROOM WARNING] '{clean_title}' requires {file_size_gb:.1f} GB, but only {free_disk_gb:.1f} GB is free. Skipping to protect runner...", flush=True)
                 continue
 
-            # Upload missing chunk delta to Hugging Face
-            chunk_urls, target_repo = upload_movie_batch_commit(
-                file_path=dest_path,
-                slug=slug,
-                clean_title=clean_title,
-                quality=quality,
-                router=router
-            )
+            try:
+                # 1. Download stream with Adaptive 2-Tier Fallback and Quantized Delta Telemetry
+                print(f"  📥 Streaming 1:1 movie from GDrive -> {dest_path.name} (Free Disk: {free_disk_gb:.1f} GB)...", flush=True)
+                dl_time, dl_speed = download_gdrive_stream(
+                    file_id=file_id,
+                    sa_mesh_or_tokens=sa_mesh,
+                    dest_path=dest_path,
+                    expected_size=file_size,
+                    sa_offset=file_idx,
+                    file_label=clean_title
+                )
+                healing_stats["peak_dl_speed"] = max(healing_stats["peak_dl_speed"], dl_speed)
+                healing_stats["sa_rotations"] = sa_mesh.rotations_count
 
-            # Register in Supabase
-            register_in_supabase(
-                clean_title=clean_title,
-                slug=slug,
-                quality=quality,
-                file_name=sanitized_filename,
-                file_size_bytes=dest_path.stat().st_size if dest_path.exists() else file_size,
-                chunk_urls=chunk_urls,
-                target_repo=target_repo,
-                tmdb_meta=tmdb_meta,
-                supabase_url=supabase_url,
-                supabase_key=supabase_key,
-                extracted_meta=extracted_meta
-            )
+                # 2. Upload as 1:1 Single-File Mesh to Hugging Face (Zero-Chunks)
+                uploaded_raw_url, target_repo, up_speed, up_time = upload_movie_single_file(
+                    file_path=dest_path,
+                    slug=slug,
+                    clean_title=clean_title,
+                    quality=quality,
+                    router=router,
+                    canonical_name=canonical_name
+                )
+                healing_stats["peak_up_speed"] = max(healing_stats["peak_up_speed"], up_speed)
 
-            ingested_bytes += file_size
-            if f_name in folder_stats:
-                folder_stats[f_name]["ingested_bytes"] += file_size
+                # 3. Register in Supabase with Live Stopwatch Timer
+                item_tmdb = fetch_tmdb_metadata(clean_title, quality)
+                movie_id, db_latency = register_in_supabase(
+                    clean_title=clean_title,
+                    slug=slug,
+                    quality=quality,
+                    file_name=sanitized_filename,
+                    file_size_bytes=dest_path.stat().st_size if dest_path.exists() else file_size,
+                    hf_raw_url=uploaded_raw_url,
+                    target_repo=target_repo,
+                    tmdb_meta=item_tmdb,
+                    supabase_url=supabase_url,
+                    supabase_key=supabase_key,
+                    extracted_meta=extracted_meta
+                )
 
-            # Clean up local file
-            if dest_path.exists():
-                dest_path.unlink()
+                ingested_bytes += file_size
+                n_sb_val += 1
+                n_hf_val += 1
+                repo_key = target_repo.split('/')[-1]
+                if repo_key in repo_distribution:
+                    repo_distribution[repo_key] += file_size_gb
+                if f_name in folder_stats:
+                    folder_stats[f_name]["ingested_bytes"] += file_size
+
+                # 4. Render Live Enterprise HUD after successful ingestion cycle
+                sa_email, sa_used_gb, sa_pct_left, sa_gb_left = sa_mesh.get_active_quota_health()
+                current_item = {
+                    "clean_title": clean_title,
+                    "quality": quality,
+                    "size_mb": file_size_mb,
+                    "dl_pct": 100.0,
+                    "dl_mb": file_size_mb,
+                    "dl_speed": dl_speed,
+                    "dl_time": dl_time,
+                    "hf_repo": target_repo,
+                    "hf_speed": up_speed,
+                    "hf_time": up_time,
+                    "master_id": movie_id or "Synced",
+                    "db_time_ms": db_latency
+                }
+                queue_items = gdrive_files[file_idx:file_idx + 3]
+                render_command_center_hud(
+                    n_gdrive=total_files,
+                    n_hf=n_hf_val,
+                    n_supabase=n_sb_val,
+                    ingested_gb=(ingested_bytes / (1024**3)),
+                    total_gb=total_gdrive_gb,
+                    start_time=start_time,
+                    active_sa_email=sa_email,
+                    sa_quota_left_pct=sa_pct_left,
+                    sa_quota_left_gb=sa_gb_left,
+                    sa_total_count=sa_total_count,
+                    tmdb_meta=item_tmdb,
+                    repo_distribution=repo_distribution,
+                    current_item=current_item,
+                    healing_stats=healing_stats,
+                    queue_items=queue_items,
+                    shard_index=shard_index,
+                    total_shards=total_shards,
+                    folder_stats=folder_stats
+                )
+            except Exception as dl_err:
+                healing_stats["errors"] += 1
+                err_str = str(dl_err)
+                if "quota" in err_str.lower() or "403" in err_str:
+                    print(f"  🔒 [GOOGLE GLOBAL FILE QUOTA LOCK] '{clean_title}' is temporarily restricted by Google for 24h. Skipping to next movie...", flush=True)
+                else:
+                    print(f"  ⚠️ Direct transfer failed for {clean_title} ({dl_err}), skipping...", flush=True)
+                continue
+            finally:
+                # Guaranteed Disk Reclamation: Immediately wipe temp file to free up space
+                if dest_path.exists():
+                    try:
+                        dest_path.unlink()
+                    except Exception:
+                        pass
 
 
 if modal:
@@ -1427,6 +1820,8 @@ if modal:
             "SUPABASE_SERVICE_ROLE_KEY": os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
             "GOOGLE_DRIVE_FOLDER_ID": os.getenv("GOOGLE_DRIVE_FOLDER_ID", ""),
             "SERVICE_ACCOUNTS_JSON": sa_json_env,
+            "TMDB_API_KEY": os.getenv("TMDB_API_KEY", ""),
+            "OMDB_API_KEY": os.getenv("OMDB_API_KEY", ""),
         })
     ]
 

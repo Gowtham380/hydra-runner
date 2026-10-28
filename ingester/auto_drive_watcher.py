@@ -681,59 +681,14 @@ def main():
         load_dotenv(dotenv_path=root_env)
     load_dotenv()
 
-    parser = argparse.ArgumentParser(description="SMD PRIME - Ultra-Fast Parallel Cloud Mesh Ingestion Engine")
-    parser.add_argument("--folder-id", "-f", default="", help="Google Drive Folder ID")
-    parser.add_argument("--dir", "-d", default="", help="Local directory path")
-    parser.add_argument("--repo", "-r", default="", help="Hugging Face Base Dataset Repo ID")
-    parser.add_argument("--interval", "-i", type=int, default=60, help="Polling interval in seconds")
-    parser.add_argument("--once", action="store_true", help="Run single pass instead of continuous daemon mode")
-
-    args = parser.parse_args()
-
-    hf_token = os.getenv("HF_TOKEN")
-    repo_id = args.repo or os.getenv("HF_REPO_ID")
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-    folder_id = args.folder_id or os.getenv("GOOGLE_DRIVE_FOLDER_ID")
-
-    if not folder_id and not args.dir:
-        print("❌ Error: Must specify either --folder-id or --dir (or set GOOGLE_DRIVE_FOLDER_ID in .env)")
-        sys.exit(1)
-
-    if not repo_id or not hf_token:
-        print("❌ Error: HF_REPO_ID and HF_TOKEN are required.")
-        sys.exit(1)
-
-    sa_pool = load_service_accounts_from_supabase_or_env(supabase_url, supabase_key)
-    print(f"🔑 Service Account Mesh Pool Initialized: {len(sa_pool)} Active Account(s) Loaded.")
-
-    repo_mgr = ThreadSafeMultiRepoManager(repo_id, hf_token)
-
-    if args.once:
-        print("🚀 Running Ultra-Fast Parallel single-pass migration cycle...")
-        run_sync_cycle(args.dir, folder_id, repo_mgr, supabase_url, supabase_key)
-        print("🎉 Parallel Sync completed!")
-    else:
-        print("==================================================================")
-        print("🚀 SMD PRIME - ULTRA-FAST PARALLEL CLOUD MESH DAEMON ACTIVE")
-        print("==================================================================")
-        if folder_id: print(f"📁 Google Drive Folder ID: {folder_id}")
-        if args.dir: print(f"📂 Watching Folder:       {args.dir}")
-        print(f"⚡ Parallel Workers:      8 Threads (In-Memory BytesIO)")
-        print(f"🔑 Active SA Pool:        {len(sa_pool)} Account(s)")
-        print(f"⏱️  Poll Interval:         Every {args.interval} seconds")
-        print("Press Ctrl+C to stop daemon.")
-        print("==================================================================\n")
-
-        try:
-            while True:
-                count = run_sync_cycle(args.dir, folder_id, repo_mgr, supabase_url, supabase_key)
-                if count > 0:
-                    print(f"✨ Auto-processed {count} new movie(s).")
-                time.sleep(args.interval)
-        except KeyboardInterrupt:
-            print("\n🛑 Daemon stopped by user.")
+    print("🚀 Forwarding execution to SMD PRIME 1:1 Native Single-File Mesh Migration Engine...")
+    try:
+        from ingester.modal_drive_migrator import run_matrix_shard_migrator
+    except ImportError:
+        from modal_drive_migrator import run_matrix_shard_migrator
+    run_matrix_shard_migrator(shard_index=1, total_shards=1)
 
 
 if __name__ == "__main__":
     main()
+

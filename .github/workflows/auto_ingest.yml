@@ -38,4 +38,4 @@ jobs:
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           SERVICE_ACCOUNTS_JSON: ${{ secrets.SERVICE_ACCOUNTS_JSON }}
         run: |
-          python ingester/auto_drive_watcher.py --once
+          python ingester/modal_drive_migrator.py
