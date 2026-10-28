@@ -1658,7 +1658,13 @@ def run_migration_logic():
 
             file_size_mb = file_size / (1024**2) if file_size > 0 else 721.4
             file_size_gb = file_size / (1024**3) if file_size > 0 else 0.70
-            dest_path = temp_dir_path / sanitized_filename
+
+            # Safe Local Destination: Linux ext4 limits individual filename to 255 bytes.
+            # Keep local temp filename short (<= 120 chars) while preserving full sanitized_filename in DB & HF
+            safe_local_stem = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', sanitized_filename)
+            if len(safe_local_stem) > 120:
+                safe_local_stem = f"{safe_local_stem[:100]}_{str(file_id)[:8]}.tmp"
+            dest_path = temp_dir_path / safe_local_stem
 
             target_repo = router.get_target_repo(slug, quality)
             canonical_name = (extracted_meta and extracted_meta.get("canonical_name")) or f"{slug}_{quality}"
@@ -1803,11 +1809,12 @@ def run_migration_logic():
                 continue
             finally:
                 # Guaranteed Disk Reclamation: Immediately wipe temp file to free up space
-                if dest_path.exists():
-                    try:
-                        dest_path.unlink()
-                    except Exception:
-                        pass
+                try:
+                    if dest_path and dest_path.exists():
+                        dest_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
 
 
 if modal:
