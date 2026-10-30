@@ -85,12 +85,13 @@ PIRATE_WATERMARK_PATTERNS = [
     r'(?i)https?://\S+',
     r'(?i)^(?:https?://|www\.)[a-zA-Z0-9\.\-]+\.[a-zA-Z]{2,12}\b\s*[-_:~|]*\s*',
     r'(?i)^[a-zA-Z0-9\-]+\.(?:com|org|net|me|in|co|cc|top|hair|capital|baby|yachts|vip|pw|to|is|ws|pe|pm|ph|ag|by|gs|cards|meme|lease|rocks|live|lat|club|info|ms|tel|si|ing|vin|promo|solar|reisen)\b\s*[-_:~|]+\s*',
+    r'(?i)^@?(?:sam[\s_]*dub[\s_]*lezha|tamizh[\s_]*cinemaz)(?:[_\s\-–—:=|]+|$)',
     r'(?i)^@(?:[A-Za-z0-9_.-]+)[\s\-–—:=|]+',
-    r'(?i)^@(?:Alinallmovies|LK_MOVIES\d*|TamilMov_LinkZz|TamilMob_LinkZz|ViP_LinkzZ|SAM_DUB_LEZHa|All_animes_in_telugu_Go|SheikXMovies|Tamilrockers|Isaimini|MoviezTamizha|Av_Linkz|Infinite_Anime|AnimeMoviesArc|GTM|SMD|TGStream)[_\s-]*',
-    r'(?i)^\[\s*(?:tgstream|smd|gtm|crazymoviescmc|exclusive|tamildbox|tnhits|1tamilmv|hindianimezone|toonworld4all|mkvcinemas|bolly4u|hdhub4u|filmyzilla|desiremovies|world4ufree|snxt|razor|lezha|tglezha)[^\]]*\]\s*[-_:~|]*\s*',
-    r'(?i)^(?:1\s*tamilmv|1\s*amilmv|tamilblasters|tamilrockers|movieztamizha|movieemanhd|movieeman|massmovies\d*|lkmovies\d*|dctamil|dc\s*tamil|omgxmovies|sam\s*dub\s*lezha|samdub|lezha|tglezha|tamilyogi|isaimini|kuttymovies|cinemavilla|bolly4u|hdhub4u|filmyzilla|desiremovies|world4ufree|snxt|skymovieshd|cinevood|moviesda|jioblasters|ibomma)\b\s*[-_:~| ]*'
-
+    r'(?i)^@(?:Alinallmovies|LK_MOVIES\d*|TamilMov_LinkZz|TamilMob_LinkZz|ViP_LinkzZ|SAM_DUB_LEZHa|sam_dub_lezha|tamizhcinemaz|tamizh_cinemaz|All_animes_in_telugu_Go|SheikXMovies|Tamilrockers|Isaimini|MoviezTamizha|Av_Linkz|Infinite_Anime|AnimeMoviesArc|GTM|SMD|TGStream)[_\s-]*',
+    r'(?i)^\[\s*(?:tgstream|smd|gtm|crazymoviescmc|exclusive|tamildbox|tnhits|1tamilmv|hindianimezone|toonworld4all|mkvcinemas|bolly4u|hdhub4u|filmyzilla|desiremovies|world4ufree|snxt|sam_dub_lezha|samdublezha|tamizhcinemaz|lezha|tglezha)[^\]]*\]\s*[-_:~|]*\s*',
+    r'(?i)^(?:1\s*tamilmv|1\s*amilmv|tamilblasters|tamilrockers|movieztamizha|movieemanhd|movieeman|massmovies\d*|lkmovies\d*|dctamil|dc\s*tamil|omgxmovies|sam\s*dub\s*lezha|samdub|lezha|tglezha|tamizhcinemaz|tamizh\s*cinemaz|tamilyogi|isaimini|kuttymovies|cinemavilla|bolly4u|hdhub4u|filmyzilla|desiremovies|world4ufree|snxt|skymovieshd|cinevood|moviesda|jioblasters|ibomma)\b\s*[-_:~| ]*'
 ]
+
 
 
 def strip_pirate_and_channel_prefixes(name: str) -> str:
@@ -100,6 +101,11 @@ def strip_pirate_and_channel_prefixes(name: str) -> str:
         if cleaned.lower().endswith(ext):
             cleaned = cleaned[:-len(ext)].strip()
             break
+
+    # Strip telegram channel handles before underscore conversion to protect multi-word handles like @SAM_DUB_LEZHa
+    cleaned = re.sub(r'(?i)^@?(?:sam[\s_]*dub[\s_]*lezha|tamizh[\s_]*cinemaz)(?:[_\s\-–—:=|]+|$)', '', cleaned).strip()
+    cleaned = re.sub(r'(?i)^\[\s*(?:sam[\s_]*dub[\s_]*lezha|tamizh[\s_]*cinemaz)[^\]]*\]\s*[-_:~| ]*', '', cleaned).strip()
+    cleaned = re.sub(r'(?i)^@[A-Za-z0-9_.-]+(?:\s*[-–—:=|]+\s*|\s+)', '', cleaned).strip()
 
     cleaned = cleaned.replace('_', ' ')
     # Fix glued years like Shoot_The_Kuruvi2023 -> Shoot The Kuruvi 2023
