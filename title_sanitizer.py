@@ -87,8 +87,9 @@ PIRATE_WATERMARK_PATTERNS = [
     r'(?i)^[a-zA-Z0-9\-]+\.(?:com|org|net|me|in|co|cc|top|hair|capital|baby|yachts|vip|pw|to|is|ws|pe|pm|ph|ag|by|gs|cards|meme|lease|rocks|live|lat|club|info|ms|tel|si|ing|vin|promo|solar|reisen)\b\s*[-_:~|]+\s*',
     r'(?i)^@(?:[A-Za-z0-9_.-]+)[\s\-–—:=|]+',
     r'(?i)^@(?:Alinallmovies|LK_MOVIES\d*|TamilMov_LinkZz|TamilMob_LinkZz|ViP_LinkzZ|SAM_DUB_LEZHa|All_animes_in_telugu_Go|SheikXMovies|Tamilrockers|Isaimini|MoviezTamizha|Av_Linkz|Infinite_Anime|AnimeMoviesArc|GTM|SMD|TGStream)[_\s-]*',
-    r'(?i)^\[\s*(?:tgstream|smd|gtm|crazymoviescmc|exclusive|tamildbox|tnhits|1tamilmv|hindianimezone|toonworld4all|mkvcinemas|bolly4u|hdhub4u|filmyzilla|desiremovies|world4ufree|snxt|razor)[^\]]*\]\s*[-_:~|]*\s*',
-    r'(?i)^(?:1\s*tamilmv|1\s*amilmv|tamilblasters|tamilrockers|movieztamizha|movieemanhd|movieeman|massmovies\d*|lkmovies\d*|dctamil|dc\s*tamil|omgxmovies|samdub|tamilyogi|isaimini|kuttymovies|cinemavilla|bolly4u|hdhub4u|filmyzilla|desiremovies|world4ufree|snxt|razor|skymovieshd|cinevood|moviesda|jioblasters|ibomma)\b\s*[-_:~|]+\s*'
+    r'(?i)^\[\s*(?:tgstream|smd|gtm|crazymoviescmc|exclusive|tamildbox|tnhits|1tamilmv|hindianimezone|toonworld4all|mkvcinemas|bolly4u|hdhub4u|filmyzilla|desiremovies|world4ufree|snxt|razor|lezha|tglezha)[^\]]*\]\s*[-_:~|]*\s*',
+    r'(?i)^(?:1\s*tamilmv|1\s*amilmv|tamilblasters|tamilrockers|movieztamizha|movieemanhd|movieeman|massmovies\d*|lkmovies\d*|dctamil|dc\s*tamil|omgxmovies|sam\s*dub\s*lezha|samdub|lezha|tglezha|tamilyogi|isaimini|kuttymovies|cinemavilla|bolly4u|hdhub4u|filmyzilla|desiremovies|world4ufree|snxt|skymovieshd|cinevood|moviesda|jioblasters|ibomma)\b\s*[-_:~| ]*'
+
 ]
 
 
