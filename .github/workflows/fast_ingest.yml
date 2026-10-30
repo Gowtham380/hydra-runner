@@ -1,0 +1,66 @@
+name: ⚡ 1. Fast Ingest (New Files Only)
+
+on:
+  schedule:
+    # Autonomous hourly check for new files (24/7)
+    - cron: '15 * * * *'
+  workflow_dispatch:
+    # Allows manual one-click trigger from GitHub Actions tab
+
+jobs:
+  fast-ingest:
+    name: ⚡ Fast Ingest (Delta Only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🧹 Free Up 65GB+ NVMe Disk Space (Strip OS Bloatware)
+        run: |
+          echo "=== DISK BEFORE CLEANUP ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune -a --force || true
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile || true
+          echo "=== DISK AFTER CLEANUP (65GB+ FREE NVMe) ==="
+          df -h /
+
+      - name: 🔄 Dynamic Engine Sync (Single Source of Truth from SMD-PRIME)
+        run: |
+          if [ -n "${{ secrets.GH_PAT }}" ]; then
+            echo "🚀 Fetching latest SMD-PRIME master engine via GH_PAT..."
+            git clone --depth 1 https://${{ secrets.GH_PAT }}@github.com/Gowtham380/SMD-PRIME.git engine
+            echo "ENGINE_DIR=engine" >> $GITHUB_ENV
+          else
+            echo "ℹ️ GH_PAT not provided. Running local fallback scripts in runner..."
+            echo "ENGINE_DIR=." >> $GITHUB_ENV
+          fi
+
+      - name: 🐍 Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: 📦 Install Ingestion Engine Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install huggingface_hub requests python-dotenv cryptography google-auth google-api-python-client
+
+      - name: ⚡ Execute Fast Ingestion Engine (New Files Only)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          SERVICE_ACCOUNTS_JSON: ${{ secrets.SERVICE_ACCOUNTS_JSON }}
+          DELTA_ONLY: "true"
+          TOTAL_SHARDS: 1
+          SHARD_INDEX: 1
+        run: |
+          python $ENGINE_DIR/ingester/modal_drive_migrator.py

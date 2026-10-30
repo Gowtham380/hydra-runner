@@ -574,6 +574,89 @@ def fetch_supabase_live_counts(supabase_url: str, supabase_key: str) -> tuple[in
     return n_sb, n_hf
 
 
+def fetch_existing_supabase_filenames(supabase_url: str, supabase_key: str) -> set:
+    """
+    Fetches all registered file names, clean filenames, and slug+quality composites
+    from Supabase `movie_files` and `series_files` in bulk (0.5s).
+    Returns a set of normalized keys for instant O(1) membership testing.
+    """
+    if not supabase_url or not supabase_key:
+        return set()
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}"
+    }
+
+    def _norm(s: str) -> str:
+        return re.sub(r'[^a-zA-Z0-9]', '', str(s or '')).lower()
+
+    existing_keys = set()
+    try:
+        # Fetch movie_files joined with movies(slug)
+        res_m = requests.get(
+            f"{supabase_url.rstrip('/')}/rest/v1/movie_files?select=file_name,clean_filename,quality,movies(slug)",
+            headers=headers,
+            timeout=12
+        )
+        if res_m.ok and isinstance(res_m.json(), list):
+            for row in res_m.json():
+                fn = row.get("file_name")
+                cfn = row.get("clean_filename")
+                if fn:
+                    existing_keys.add(_norm(fn))
+                if cfn:
+                    existing_keys.add(_norm(cfn))
+                m = row.get("movies") or {}
+                slug = m.get("slug")
+                quality = row.get("quality")
+                if slug and quality:
+                    existing_keys.add(f"movie:{slug}:{quality}")
+
+        # Fetch series_files joined with series(slug)
+        res_s = requests.get(
+            f"{supabase_url.rstrip('/')}/rest/v1/series_files?select=file_name,clean_filename,quality,season_number,episode_number,series(slug)",
+            headers=headers,
+            timeout=12
+        )
+        if res_s.ok and isinstance(res_s.json(), list):
+            for row in res_s.json():
+                fn = row.get("file_name")
+                cfn = row.get("clean_filename")
+                if fn:
+                    existing_keys.add(_norm(fn))
+                if cfn:
+                    existing_keys.add(_norm(cfn))
+                s = row.get("series") or {}
+                sslug = s.get("slug")
+                s_num = row.get("season_number", 1)
+                ep_num = row.get("episode_number", 1)
+                quality = row.get("quality")
+                if sslug and quality:
+                    existing_keys.add(f"series:{sslug}:s{s_num}:e{ep_num}:{quality}")
+
+        # Also fetch master movies just in case
+        res_mov = requests.get(
+            f"{supabase_url.rstrip('/')}/rest/v1/movies?select=file_name,clean_filename,slug",
+            headers=headers,
+            timeout=10
+        )
+        if res_mov.ok and isinstance(res_mov.json(), list):
+            for row in res_mov.json():
+                fn = row.get("file_name")
+                cfn = row.get("clean_filename")
+                if fn:
+                    existing_keys.add(_norm(fn))
+                if cfn:
+                    existing_keys.add(_norm(cfn))
+
+    except Exception as e:
+        print(f"  ⚠️ [DELTA FILTER] Warning querying Supabase existing ledger: {e}")
+
+    return existing_keys
+
+
+
 # ================================================================================
 # PROJECT HYDRA - ULTIMATE TRI-MESH COMMAND CENTER HUD UI RENDERER
 # ================================================================================
@@ -1564,9 +1647,59 @@ def run_migration_logic():
     # 1. Scan GDrive Folder
     raw_gdrive_files = fetch_gdrive_folder_files(folder_id, access_token)
     total_raw_files = len(raw_gdrive_files)
+
+    # 1.5 Load Existing Supabase Ledger for Delta & Instant Skip
+    t_delta_start = time.time()
+    existing_keys = fetch_existing_supabase_filenames(supabase_url, supabase_key)
+    delta_query_time = time.time() - t_delta_start
+    print(f"  ⚡ [SUPABASE LEDGER] Pre-loaded {len(existing_keys)} existing file keys in {delta_query_time:.2f}s.")
+
+    def _norm(s: str) -> str:
+        return re.sub(r'[^a-zA-Z0-9]', '', str(s or '')).lower()
+
+    def check_file_is_in_ledger(raw_name: str, sanitized_filename: str, clean_display: str, slug: str, quality: str, extracted_meta: dict) -> bool:
+        if not existing_keys:
+            return False
+        if _norm(raw_name) in existing_keys or _norm(sanitized_filename) in existing_keys or _norm(clean_display) in existing_keys:
+            return True
+        if f"movie:{slug}:{quality}" in existing_keys:
+            return True
+        if extracted_meta and extracted_meta.get("series_title"):
+            s_title = extracted_meta.get("series_title")
+            s_slug = re.sub(r'[^a-z0-9]+', '-', s_title.lower()).strip('-')
+            s_num = extracted_meta.get("season", 1)
+            ep_num = extracted_meta.get("episode", 1)
+            if f"series:{s_slug}:s{s_num}:e{ep_num}:{quality}" in existing_keys:
+                return True
+        return False
+
+    delta_only = os.getenv("DELTA_ONLY", "false").lower() in ("true", "1", "yes")
+    if delta_only:
+        print("⚡ [FAST INGEST MODE] Delta Filter Active: isolating only brand-new uningested files...")
+        new_files = []
+        skipped_count = 0
+        for item in raw_gdrive_files:
+            raw_name = item.get("name", "")
+            clean_title, sanitized_filename, slug, quality, extracted_meta = sanitize_movie_title(raw_name)
+            clean_display = (extracted_meta and extracted_meta.get("clean_filename")) or f"{clean_title} [{quality}].mkv"
+            if check_file_is_in_ledger(raw_name, sanitized_filename, clean_display, slug, quality, extracted_meta):
+                skipped_count += 1
+            else:
+                new_files.append(item)
+
+        print(f"  ⚡ [BULK DELTA FILTER] ⏩ Skipped {skipped_count} existing files in 0.05s!")
+        print(f"  🔥 Found {len(new_files)} BRAND NEW file(s) to ingest.")
+
+        if not new_files:
+            print("🎉 [ALL UP TO DATE] All files in GDrive are already present in Supabase! Exiting cleanly in seconds.")
+            return
+
+        raw_gdrive_files = new_files
+        total_raw_files = len(raw_gdrive_files)
     
     shard_index = int(os.getenv("SHARD_INDEX", "1"))
     total_shards = int(os.getenv("TOTAL_SHARDS", "1"))
+
     
     if total_shards > 1:
         gdrive_files = [f for idx, f in enumerate(raw_gdrive_files) if (idx % total_shards) + 1 == shard_index]
@@ -1678,21 +1811,27 @@ def run_migration_logic():
             if file_size > 0 and is_already_on_hf:
                 print(f"  ⚡ [PRE-CHECK 100% COMPLETE] {clean_title} [{quality}] already verified on HF (1-File Native Stream)!", flush=True)
                 print(f"  ⏩ INSTANT SKIPPING GDrive Download & Bandwidth Consumption!", flush=True)
-                item_tmdb = fetch_tmdb_metadata(clean_title, quality)
-                movie_id, db_latency = register_in_supabase(
-                    clean_title=clean_title,
-                    slug=slug,
-                    quality=quality,
-                    file_name=sanitized_filename,
-                    file_size_bytes=file_size,
-                    hf_raw_url=single_raw_url,
-                    target_repo=target_repo,
-                    tmdb_meta=item_tmdb,
-                    supabase_url=supabase_url,
-                    supabase_key=supabase_key,
-                    extracted_meta=extracted_meta
-                )
+                clean_display_filename = (extracted_meta and extracted_meta.get("clean_filename")) or f"{clean_title} [{quality}].mkv"
+                already_in_db = check_file_is_in_ledger(raw_name, sanitized_filename, clean_display_filename, slug, quality, extracted_meta)
+                if not already_in_db:
+                    item_tmdb = fetch_tmdb_metadata(clean_title, quality)
+                    movie_id, db_latency = register_in_supabase(
+                        clean_title=clean_title,
+                        slug=slug,
+                        quality=quality,
+                        file_name=sanitized_filename,
+                        file_size_bytes=file_size,
+                        hf_raw_url=single_raw_url,
+                        target_repo=target_repo,
+                        tmdb_meta=item_tmdb,
+                        supabase_url=supabase_url,
+                        supabase_key=supabase_key,
+                        extracted_meta=extracted_meta
+                    )
+                else:
+                    print(f"  ⚡ [DB LEDGER CONFIRMED] '{clean_title}' already indexed in Supabase. Zero duplicate API calls!", flush=True)
                 healing_stats["auto_heals"] += 1
+
                 ingested_bytes += file_size
                 n_sb_val += 1
                 n_hf_val += 1

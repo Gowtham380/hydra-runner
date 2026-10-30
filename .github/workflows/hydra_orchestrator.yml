@@ -1,16 +1,15 @@
-name: Hydra Tri-Mesh Orchestrator & Auto-Healer
+name: 🩺 3. DB & Poster Healer
 
 on:
   schedule:
     # Run automatically every 3 hours
     - cron: '0 */3 * * *'
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    # Allows manual one-click trigger from GitHub Actions tab anytime
 
 jobs:
   tri_mesh_reconcile_and_heal:
+    name: 🩺 DB & Poster Healer
     runs-on: ubuntu-latest
 
     steps:
@@ -35,7 +34,7 @@ jobs:
             git clone --depth 1 https://${{ secrets.GH_PAT }}@github.com/Gowtham380/SMD-PRIME.git engine
             echo "ENGINE_DIR=engine" >> $GITHUB_ENV
           else
-            echo "ℹ️ GH_PAT not provided. Running local fallback scripts in hydra-runner..."
+            echo "ℹ️ GH_PAT not provided. Running local fallback scripts in runner..."
             echo "ENGINE_DIR=." >> $GITHUB_ENV
           fi
 
@@ -50,7 +49,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests huggingface_hub python-dotenv
 
-      - name: 🛡️ Run Tri-Mesh Orchestrator & Auto-Healer (4-Table Schema)
+      - name: 🛡️ Run DB & Poster Healer (Reconcile & Repair)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -61,4 +60,3 @@ jobs:
           OMDB_API_KEY: ${{ secrets.OMDB_API_KEY }}
         run: |
           python $ENGINE_DIR/reconcile_and_repair.py
-

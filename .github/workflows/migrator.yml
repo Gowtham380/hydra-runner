@@ -1,14 +1,14 @@
-name: Project Hydra Automated Migration Engine (Matrix Shard Pipeline)
+name: 🔄 2. Full Shard Sync (Shards 1-4)
 
 on:
   schedule:
-    # Autonomous trigger every 1 hour (24/7)
-    - cron: '0 * * * *'
+    # Autonomous trigger every 3 hours
+    - cron: '0 */3 * * *'
   workflow_dispatch: # Allows manual trigger from GitHub Actions tab anytime
 
 jobs:
   migrate:
-    name: Shard Runner (${{ matrix.shard }}/4)
+    name: Shard (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 360 # Maximum allowed 6-hour runner limit
     strategy:
@@ -38,7 +38,7 @@ jobs:
             git clone --depth 1 https://${{ secrets.GH_PAT }}@github.com/Gowtham380/SMD-PRIME.git engine
             echo "ENGINE_DIR=engine" >> $GITHUB_ENV
           else
-            echo "ℹ️ GH_PAT not provided. Running local fallback scripts in hydra-runner..."
+            echo "ℹ️ GH_PAT not provided. Running local fallback scripts in runner..."
             echo "ENGINE_DIR=." >> $GITHUB_ENV
           fi
 
@@ -53,15 +53,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install huggingface_hub requests python-dotenv cryptography google-auth google-api-python-client
 
-      - name: 🚀 Execute Matrix Shard Migration Engine (${{ matrix.shard }}/4)
+      - name: 🚀 Execute Shard Migration Engine (${{ matrix.shard }}/4)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           SERVICE_ACCOUNTS_JSON: ${{ secrets.SERVICE_ACCOUNTS_JSON }}
           SHARD_INDEX: ${{ matrix.shard }}
           TOTAL_SHARDS: 4
         run: |
           python $ENGINE_DIR/ingester/modal_drive_migrator.py
-
