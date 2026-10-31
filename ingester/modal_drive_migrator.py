@@ -1190,7 +1190,7 @@ def get_gdrive_access_token_from_sa(sa: dict) -> str:
 
 
 def fetch_gdrive_folder_files(folder_id: str, access_token: str = "", folder_name: str = "Main Storage") -> list:
-    """Fetch video files from Google Drive API across one or more folder IDs (comma-separated)"""
+    """Fetch video files from Google Drive API across one or more folder IDs (comma-separated) with full pagination"""
     if not folder_id:
         return []
     
@@ -1203,28 +1203,67 @@ def fetch_gdrive_folder_files(folder_id: str, access_token: str = "", folder_nam
 
     headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
     api_key = os.getenv("GOOGLE_API_KEY", "")
-    query = f"'{folder_id}' in parents and trashed = false"
-    url = f"https://www.googleapis.com/drive/v3/files?q={requests.utils.quote(query)}&fields=files(id,name,size,mimeType)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true"
-    if not access_token and api_key:
-        url += f"&key={api_key}"
+    base_url = "https://www.googleapis.com/drive/v3/files"
     
     all_files = []
-    try:
-        res = requests.get(url, headers=headers, timeout=15)
-        if res.ok:
-            items = res.json().get("files", [])
-            for item in items:
-                mime = item.get("mimeType", "")
-                name = item.get("name", "")
-                if mime == "application/vnd.google-apps.folder":
-                    all_files.extend(fetch_gdrive_folder_files(item["id"], access_token, folder_name=name))
-                elif name.lower().endswith(('.mkv', '.mp4', '.avi', '.mov', '.webm', '.m4v')) or mime.startswith("video/"):
-                    item["folder_name"] = folder_name
-                    all_files.append(item)
-        else:
-            print(f"  ❌ GDrive API error {res.status_code}: {res.text}")
-    except Exception as e:
-        print(f"  ⚠️ GDrive Fetch Warning: {e}")
+    page_token = None
+    page_count = 0
+    
+    while True:
+        page_count += 1
+        params = {
+            "q": f"'{folder_id}' in parents and trashed = false",
+            "fields": "nextPageToken,files(id,name,size,mimeType,shortcutDetails)",
+            "pageSize": 1000,
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true"
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        if not access_token and api_key:
+            params["key"] = api_key
+
+        try:
+            res = requests.get(base_url, headers=headers, params=params, timeout=30)
+            if res.ok:
+                data = res.json()
+                items = data.get("files", [])
+                subfolders = []
+                for item in items:
+                    mime = item.get("mimeType", "")
+                    name = item.get("name", "")
+                    
+                    # Handle GDrive Shortcuts
+                    if mime == "application/vnd.google-apps.shortcut" and "shortcutDetails" in item:
+                        details = item.get("shortcutDetails", {})
+                        target_mime = details.get("targetMimeType", "")
+                        target_id = details.get("targetId")
+                        if target_mime == "application/vnd.google-apps.folder":
+                            subfolders.append((target_id, name))
+                        elif name.lower().endswith(('.mkv', '.mp4', '.avi', '.mov', '.webm', '.m4v', '.flv', '.ts', '.m2ts')) or target_mime.startswith("video/"):
+                            item["id"] = target_id
+                            item["folder_name"] = folder_name
+                            all_files.append(item)
+                    elif mime == "application/vnd.google-apps.folder":
+                        subfolders.append((item["id"], name))
+                    elif name.lower().endswith(('.mkv', '.mp4', '.avi', '.mov', '.webm', '.m4v', '.flv', '.ts', '.m2ts')) or mime.startswith("video/"):
+                        item["folder_name"] = folder_name
+                        all_files.append(item)
+
+                # Recursively fetch subfolders
+                for sf_id, sf_name in subfolders:
+                    all_files.extend(fetch_gdrive_folder_files(sf_id, access_token, folder_name=sf_name))
+
+                page_token = data.get("nextPageToken")
+                if not page_token:
+                    break
+            else:
+                print(f"  ❌ GDrive API error {res.status_code}: {res.text}")
+                break
+        except Exception as e:
+            print(f"  ⚠️ GDrive Fetch Warning on page {page_count}: {e}")
+            break
+
     return all_files
 
 
