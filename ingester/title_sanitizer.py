@@ -96,7 +96,7 @@ PIRATE_WATERMARK_PATTERNS = [
 
 def strip_pirate_and_channel_prefixes(name: str) -> str:
     """Removes pirate domains, telegram handles, and copy prefixes with non-greedy precision."""
-    cleaned = name.strip(" '\"[]()")
+    cleaned = name.strip(" '\"")
     for ext in VALID_VIDEO_EXTENSIONS:
         if cleaned.lower().endswith(ext):
             cleaned = cleaned[:-len(ext)].strip()
@@ -114,12 +114,16 @@ def strip_pirate_and_channel_prefixes(name: str) -> str:
     for _ in range(5):
         prev = cleaned
         for pat in PIRATE_WATERMARK_PATTERNS:
-            cleaned = re.sub(pat, '', cleaned).strip(' .-_:[]()\'\"')
+            new_c = re.sub(pat, '', cleaned)
+            if new_c != cleaned:
+                cleaned = new_c.strip(' .-_:[]()\'\"')
         for site in KNOWN_PIRATE_SITES:
-            cleaned = re.sub(r'(?i)^' + site + r'\s*[-:_]*\s*', '', cleaned).strip(' .-_:[]()\'\"')
+            new_c = re.sub(r'(?i)^' + site + r'\s*[-:_]*\s*', '', cleaned)
+            if new_c != cleaned:
+                cleaned = new_c.strip(' .-_:[]()\'\"')
         if cleaned == prev:
             break
-    return cleaned.strip()
+    return cleaned.strip(' .-_:[]()\'\"')
 
 
 def extract_tech_specs(raw_name: str) -> Dict[str, Any]:
@@ -283,9 +287,12 @@ def build_scene_canonical_name(meta: Dict[str, Any], ext: str = ".mkv") -> str:
         ep_start = meta.get("episode", 1)
         ep_end = meta.get("episode_end", ep_start)
         is_batch = meta.get("is_batch", False)
+        is_season_pack = meta.get("is_season_pack", False)
         year_str = f" ({year})" if meta.get("year") else ""
-        if is_batch:
-            ep_tag = f"EP({ep_start:02d}-{ep_end:02d})" if ep_end > ep_start else f"S{s_num:02d} Complete"
+        if is_season_pack or (is_batch and ep_end <= ep_start):
+            base_anchor = f"{series_title} S{s_num:02d}{year_str} Complete"
+        elif is_batch:
+            ep_tag = f"EP({ep_start:02d}-{ep_end:02d})"
             base_anchor = f"{series_title} S{s_num:02d}{year_str} {ep_tag}"
         else:
             base_anchor = f"{series_title} S{s_num:02d}E{ep_start:02d}{year_str}"
@@ -381,6 +388,7 @@ def parse_video_line(raw_line: str) -> Optional[Dict[str, Any]]:
     single_pat = r'(?i)\b(?:S(\d{1,2})[\s._-]*)?(?:E|EP|Episode)\.?\s*[\(\[]?\s*(\d{1,3})\s*[\)\]]?\b'
     turkish_pat = r'(?i)\b(\d{1,3})\s*\.?\s*Bölüm\b'
     day_pat = r'(?i)\bDay\s*(\d{1,3})\b'
+    season_pack_pat = r'(?i)\b(?:S(\d{1,2})|Season\s*(\d{1,2}))\b'
 
     bm_paren = re.search(batch_paren_pat, cleaned_stem)
     bm_std = re.search(batch_std_pat, cleaned_stem)
@@ -389,8 +397,9 @@ def parse_video_line(raw_line: str) -> Optional[Dict[str, Any]]:
     sm = re.search(single_pat, cleaned_stem)
     tm = re.search(turkish_pat, cleaned_stem)
     dm = re.search(day_pat, cleaned_stem)
+    spm = re.search(season_pack_pat, cleaned_stem)
 
-    if bm_paren or bm_std or cm or msm or sm or tm or dm:
+    if bm_paren or bm_std or cm or msm or sm or tm or dm or spm:
         season_num = 1
         ep_start = 1
         ep_end = 1
@@ -434,6 +443,11 @@ def parse_video_line(raw_line: str) -> Optional[Dict[str, Any]]:
             ep_start = int(dm.group(1))
             ep_end = ep_start
             match_span = dm.span()
+        elif spm:
+            season_num = int(spm.group(1) or spm.group(2) or 1)
+            is_batch = True
+            is_season_pack = True
+            match_span = spm.span()
 
         if is_batch and ep_end < ep_start:
             ep_start, ep_end = ep_end, ep_start
