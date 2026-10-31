@@ -678,7 +678,9 @@ def render_command_center_hud(
     queue_items: list,
     shard_index: int = 1,
     total_shards: int = 1,
-    folder_stats: dict = None
+    folder_stats: dict = None,
+    current_file_idx: int = 1,
+    total_assigned_files: int = 1
 ):
     elapsed_sec = int(time.time() - start_time)
     elapsed_str = f"{elapsed_sec // 3600:02d}:{(elapsed_sec % 3600) // 60:02d}:{elapsed_sec % 60:02d}"
@@ -700,6 +702,11 @@ def render_command_center_hud(
     def make_bar(pct, length=20):
         filled = int(length * pct // 100)
         return '█' * min(length, filled) + '░' * max(0, length - filled)
+
+    cur_f_idx = current_file_idx or 1
+    tot_f = total_assigned_files or n_gdrive
+    file_pct = min(100.0, (cur_f_idx / max(tot_f, 1)) * 100.0)
+    remain_files = max(0, tot_f - cur_f_idx)
 
     title = current_item.get("clean_title", "Unknown")
     quality = current_item.get("quality", "1080p")
@@ -738,6 +745,9 @@ def render_command_center_hud(
     print(f"║{shard_hdr:<{w-2}}║", flush=True)
     print("╠" + "═" * (w - 2) + "╣", flush=True)
     
+    shard_prog_line = f" 📁 SHARD PROGRESS : [ File {cur_f_idx:,} of {tot_f:,} ] [{make_bar(int(file_pct))}] {file_pct:.1f}% | Left: {remain_files:,}"
+    print(f"║{shard_prog_line:<{w-2}}║", flush=True)
+
     line1 = f" 📊 GLOBAL PARITY : N_GDrive ({n_gdrive}) ≡ N_HF ({n_hf}) ≡ N_Supabase ({n_supabase}) | Sync: {sync_pct:.1f}%"
     print(f"║{line1:<{w-2}}║", flush=True)
     
@@ -1815,7 +1825,9 @@ def run_migration_logic():
         queue_items=gdrive_files[:3],
         shard_index=shard_index,
         total_shards=total_shards,
-        folder_stats=folder_stats
+        folder_stats=folder_stats,
+        current_file_idx=1,
+        total_assigned_files=total_files
     )
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -1830,6 +1842,9 @@ def run_migration_logic():
 
             file_size_mb = file_size / (1024**2) if file_size > 0 else 721.4
             file_size_gb = file_size / (1024**3) if file_size > 0 else 0.70
+
+            pct_prog = (file_idx / max(total_files, 1)) * 100.0
+            print(f"\n🚀 [SHARD {shard_index}/{total_shards}] [FILE {file_idx:,} OF {total_files:,}] ({pct_prog:.1f}%) ────► '{clean_title}' [{quality}] ({file_size_mb:.0f} MB)", flush=True)
 
             # Safe Local Destination: Linux ext4 limits individual filename to 255 bytes.
             # Keep local temp filename short (<= 120 chars) while preserving full sanitized_filename in DB & HF
@@ -1848,7 +1863,7 @@ def run_migration_logic():
             is_already_on_hf = check_single_file_exists(router.api, target_repo, slug, quality, canonical_name=canonical_name)
 
             if file_size > 0 and is_already_on_hf:
-                print(f"  ⚡ [PRE-CHECK 100% COMPLETE] {clean_title} [{quality}] already verified on HF (1-File Native Stream)!", flush=True)
+                print(f"  ⚡ [PRE-CHECK 100% COMPLETE] [{file_idx:,} of {total_files:,}] {clean_title} [{quality}] already verified on HF (1-File Native Stream)!", flush=True)
                 print(f"  ⏩ INSTANT SKIPPING GDrive Download & Bandwidth Consumption!", flush=True)
                 clean_display_filename = (extracted_meta and extracted_meta.get("clean_filename")) or f"{clean_title} [{quality}].mkv"
                 already_in_db = check_file_is_in_ledger(raw_name, sanitized_filename, clean_display_filename, slug, quality, extracted_meta)
@@ -1892,7 +1907,7 @@ def run_migration_logic():
 
             try:
                 # 1. Download stream with Adaptive 2-Tier Fallback and Quantized Delta Telemetry
-                print(f"  📥 Streaming 1:1 movie from GDrive -> {dest_path.name} (Free Disk: {free_disk_gb:.1f} GB)...", flush=True)
+                print(f"  📥 [{file_idx:,} of {total_files:,}] Streaming 1:1 movie from GDrive -> {dest_path.name} (Free Disk: {free_disk_gb:.1f} GB)...", flush=True)
                 dl_time, dl_speed = download_gdrive_stream(
                     file_id=file_id,
                     sa_mesh_or_tokens=sa_mesh,
@@ -1905,6 +1920,7 @@ def run_migration_logic():
                 healing_stats["sa_rotations"] = sa_mesh.rotations_count
 
                 # 2. Upload as 1:1 Single-File Mesh to Hugging Face (Zero-Chunks)
+                print(f"  📦 [{file_idx:,} of {total_files:,}] Uploading 1:1 single file ({file_size_gb:.2f} GB) to [{target_repo}] via HF Git LFS...", flush=True)
                 uploaded_raw_url, target_repo, up_speed, up_time = upload_movie_single_file(
                     file_path=dest_path,
                     slug=slug,
@@ -1975,7 +1991,9 @@ def run_migration_logic():
                     queue_items=queue_items,
                     shard_index=shard_index,
                     total_shards=total_shards,
-                    folder_stats=folder_stats
+                    folder_stats=folder_stats,
+                    current_file_idx=file_idx,
+                    total_assigned_files=total_files
                 )
             except Exception as dl_err:
                 healing_stats["errors"] += 1
